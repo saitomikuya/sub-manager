@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} · SubManager</title>
+  <link rel="stylesheet" href="/admin/static/style.css">
+  <script defer src="/admin/static/admin.js"></script>
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/admin/"><span class="brand-mark small">SM</span><span>订阅管理</span></a><nav><button type="button" class="link-button" data-go-back data-fallback="/admin/">← 返回上一页</button><a href="/admin/">返回列表</a></nav></header>
+  <main class="container">
+    <div class="page-heading">
+      <div><h1>{{.Subscription.Name}} · 访问日志</h1><p><code>{{.Subscription.Path}}</code> · 累计拉取 <strong>{{.Subscription.FetchCount}}</strong> 次 · 最后拉取 {{formatTime .Subscription.LastFetchedAt}}</p></div>
+      <form method="post" action="/admin/subscriptions/{{.Subscription.ID}}/logs/clear" data-confirm="确定清空该订阅的全部访问日志吗？累计拉取次数不会重置。">
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}"><button class="button danger" type="submit">清空日志</button>
+      </form>
+    </div>
+    {{if .Message}}<div class="alert alert-success">{{.Message}}</div>{{end}}
+    <form method="get" class="filter-bar">
+      <label><span>IP</span><input type="search" name="ip" value="{{.FilterIP}}" placeholder="搜索 IP"></label>
+      <label><span>客户端</span><select name="client"><option value="">全部客户端</option><option {{if eq .FilterClient "iOS 代理客户端"}}selected{{end}}>iOS 代理客户端</option><option {{if eq .FilterClient "Quantumult X"}}selected{{end}}>Quantumult X</option><option {{if eq .FilterClient "Stash"}}selected{{end}}>Stash</option><option {{if eq .FilterClient "Surge"}}selected{{end}}>Surge</option><option {{if eq .FilterClient "Clash"}}selected{{end}}>Clash</option><option {{if eq .FilterClient "curl"}}selected{{end}}>curl</option><option {{if eq .FilterClient "浏览器"}}selected{{end}}>浏览器</option><option {{if eq .FilterClient "未知客户端"}}selected{{end}}>未知客户端</option></select></label>
+      <button class="button" type="submit">筛选</button><a class="button ghost" href="/admin/subscriptions/{{.Subscription.ID}}/logs">重置</a>
+    </form>
+    <div class="table-card">
+      <div class="table-scroll">
+        <table><thead><tr><th>时间</th><th>IP</th><th>客户端</th><th>User-Agent</th><th>状态</th></tr></thead>
+          <tbody>{{range .Logs.Logs}}<tr><td class="nowrap">{{formatTimeValue .RequestedAt}}</td><td><code>{{.ClientIP}}</code></td><td><span class="badge">{{.ClientName}}</span></td><td class="user-agent" title="{{.UserAgent}}">{{if .UserAgent}}{{.UserAgent}}{{else}}—{{end}}</td><td><span class="status-ok">{{.StatusCode}}</span></td></tr>{{else}}<tr><td colspan="5" class="empty-row">没有符合条件的访问日志</td></tr>{{end}}</tbody>
+        </table>
+      </div>
+      <div class="pagination"><span>共 {{.Logs.Total}} 条，第 {{.Logs.Page}} / {{if .Logs.TotalPages}}{{.Logs.TotalPages}}{{else}}1{{end}} 页</span><div>{{if .PrevPage}}<a class="button small" href="?page={{.PrevPage}}&amp;ip={{urlquery .FilterIP}}&amp;client={{urlquery .FilterClient}}">上一页</a>{{end}} {{if .NextPage}}<a class="button small" href="?page={{.NextPage}}&amp;ip={{urlquery .FilterIP}}&amp;client={{urlquery .FilterClient}}">下一页</a>{{end}}</div></div>
+    </div>
+  </main>
+</body>
+</html>

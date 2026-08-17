@@ -1,0 +1,7 @@
+/data/
+*.db
+*.db-shm
+*.db-wal
+/sub-manager
+/server
+.DS_Store

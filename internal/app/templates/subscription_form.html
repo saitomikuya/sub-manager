@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} · SubManager</title>
+  <link rel="stylesheet" href="/admin/static/style.css">
+  <script defer src="/admin/static/admin.js"></script>
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/admin/"><span class="brand-mark small">SM</span><span>订阅管理</span></a><nav><a href="/admin/">返回列表</a></nav></header>
+  <main class="container narrow">
+    <div class="page-heading"><div><h1>{{.Title}}</h1><p>节点原始内容会在访问订阅路径时动态进行标准 Base64 编码。</p></div></div>
+    {{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}
+    <form method="post" action="{{if .IsNew}}/admin/subscriptions{{else}}/admin/subscriptions/{{.Subscription.ID}}{{end}}" class="form-card stack">
+      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <label><span>订阅名称 <small>选填</small></span><input type="text" name="name" maxlength="100" value="{{.Subscription.Name}}" placeholder="例如：Oracle 节点"></label>
+      <label>
+        <span>访问路径</span>
+        <div class="input-action"><input type="text" name="path" value="{{.Subscription.Path}}" required pattern="/[A-Za-z0-9_-]{1,64}" data-path-input><button type="button" class="button" data-generate-path>重新生成</button></div>
+        <small>以 / 开头，仅支持字母、数字、短横线和下划线。修改后旧路径立即失效。</small>
+      </label>
+      <label><span>节点内容</span><textarea name="content" rows="18" required maxlength="2097152" spellcheck="false" placeholder="每行一个节点链接">{{.Subscription.Content}}</textarea><small>最多 2 MiB，保存时会统一换行格式。</small></label>
+      <label class="checkbox-label"><input type="checkbox" name="enabled" value="1" {{if .Subscription.Enabled}}checked{{end}}> 启用此订阅</label>
+      <div class="form-actions">
+        <a class="button" href="/admin/">取消</a>
+        {{if not .IsNew}}<a class="button" href="/admin/subscriptions/{{.Subscription.ID}}/preview" target="_blank" rel="noopener">预览 Base64</a>{{end}}
+        <button type="submit" class="button primary">保存订阅</button>
+      </div>
+    </form>
+  </main>
+</body>
+</html>

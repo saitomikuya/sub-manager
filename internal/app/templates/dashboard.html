@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} · SubManager</title>
+  <link rel="stylesheet" href="/admin/static/style.css">
+  <script defer src="/admin/static/admin.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/admin/"><span class="brand-mark small">SM</span><span>订阅管理</span></a>
+    <nav>
+      <a href="/admin/settings">系统设置</a>
+      <a href="/admin/password">修改密码</a>
+      <form method="post" action="/admin/logout" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+        <button class="link-button" type="submit">退出</button>
+      </form>
+    </nav>
+  </header>
+  <main class="container">
+    <div class="page-heading">
+      <div><h1>订阅管理</h1><p>管理公开订阅路径、节点内容和访问记录。</p></div>
+      <a class="button primary" href="/admin/subscriptions/new">＋ 新增订阅</a>
+    </div>
+    {{if .Message}}<div class="alert alert-success">{{.Message}}</div>{{end}}
+
+    {{if .Subscriptions}}
+    <div class="table-card">
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th class="check-col"><input type="checkbox" data-select-all aria-label="全选"></th><th>名称与地址</th><th>状态</th><th>累计拉取</th><th>最后拉取</th><th class="actions-col">操作</th></tr></thead>
+          <tbody>
+          {{range .Subscriptions}}
+            <tr>
+              <td><input type="checkbox" name="subscription_ids" value="{{.ID}}" form="batch-form" data-subscription-check aria-label="选择 {{.Name}}"></td>
+              <td>
+                <strong>{{.Name}}</strong>
+                <div class="subscription-url"><code>{{$.BaseURL}}{{.Path}}</code><button type="button" class="icon-button" data-copy="{{$.BaseURL}}{{.Path}}" title="复制订阅地址">复制</button></div>
+              </td>
+              <td>{{if .Enabled}}<span class="badge success">已启用</span>{{else}}<span class="badge muted-badge">已停用</span>{{end}}</td>
+              <td><strong>{{.FetchCount}}</strong> 次</td>
+              <td><div>{{formatTime .LastFetchedAt}}</div>{{if .LastFetchedIP}}<small>{{.LastFetchedIP}}</small>{{end}}</td>
+              <td>
+                <div class="action-group">
+                  <a class="button small" href="/admin/subscriptions/{{.ID}}">编辑</a>
+                  <button type="button" class="button small" data-open-qr data-qr-name="{{.Name}}" data-qr-url="{{$.BaseURL}}{{.Path}}" data-qr-image="/admin/subscriptions/{{.ID}}/qrcode">二维码</button>
+                  <a class="button small" href="/admin/subscriptions/{{.ID}}/logs">日志</a>
+                  <form method="post" action="/admin/subscriptions/{{.ID}}/toggle" class="inline-form">
+                    <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+                    <button class="button small" type="submit">{{if .Enabled}}停用{{else}}启用{{end}}</button>
+                  </form>
+                  <form method="post" action="/admin/subscriptions/{{.ID}}/delete" class="inline-form" data-confirm="确定删除订阅“{{.Name}}”吗？相关访问日志也会被删除。">
+                    <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+                    <button class="button small danger" type="submit">删除</button>
+                  </form>
+                </div>
+              </td>
+            </tr>
+          {{end}}
+          </tbody>
+        </table>
+      </div>
+      <div class="bulk-bar">
+        <span>已选择 <strong data-selected-count>0</strong> 个订阅</span>
+        <button class="button" type="button" data-open-batch disabled>批量修改节点内容</button>
+      </div>
+    </div>
+
+    <dialog id="batch-dialog">
+      <form method="post" action="/admin/subscriptions/batch-content" id="batch-form" class="dialog-form">
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+        <div class="dialog-heading"><h2>批量修改节点内容</h2><button type="button" class="icon-button close" data-close-batch aria-label="关闭">×</button></div>
+        <p class="muted">选中的 <strong data-dialog-count>0</strong> 个订阅会被替换为完全相同的节点内容；名称、路径、状态、统计和日志不受影响。</p>
+        <label><span>新的节点内容</span><textarea name="content" rows="14" required placeholder="每行一个 ss://、vmess:// 或其他节点链接"></textarea></label>
+        <div class="dialog-actions"><button type="button" class="button" data-close-batch>取消</button><button type="submit" class="button primary" data-confirm-batch>确认批量替换</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="qr-dialog" class="qr-dialog">
+      <div class="dialog-form">
+        <div class="dialog-heading"><h2 data-qr-title>订阅二维码</h2><button type="button" class="icon-button close" data-close-qr aria-label="关闭">×</button></div>
+        <p class="muted">使用支持 <code>sub://</code> 订阅二维码的客户端扫描。</p>
+        <div class="qr-image-wrap"><img data-qr-code alt="订阅二维码" width="320" height="320"></div>
+        <code class="qr-url" data-qr-display-url></code>
+        <div class="dialog-actions"><button type="button" class="button" data-close-qr>关闭</button></div>
+      </div>
+    </dialog>
+    {{else}}
+    <div class="empty-state"><div class="empty-icon">↗</div><h2>还没有订阅</h2><p>创建第一条订阅，系统会自动生成一个随机访问路径。</p><a class="button primary" href="/admin/subscriptions/new">新增订阅</a></div>
+    {{end}}
+  </main>
+  <div class="toast" data-toast hidden></div>
+</body>
+</html>

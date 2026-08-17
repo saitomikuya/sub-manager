@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} · SubManager</title>
+  <link rel="stylesheet" href="/admin/static/style.css">
+</head>
+<body class="auth-page">
+  <main class="auth-card">
+    <div class="brand-mark">SM</div>
+    <h1>SubManager</h1>
+    <p class="muted">输入管理员密码继续</p>
+    {{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}
+    <form method="post" action="/admin/login" class="stack">
+      <label>
+        <span>密码</span>
+        <input type="password" name="password" required autofocus autocomplete="current-password">
+      </label>
+      <button type="submit" class="button primary full">登录</button>
+    </form>
+  </main>
+</body>
+</html>

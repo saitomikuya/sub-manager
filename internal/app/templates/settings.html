@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} · SubManager</title>
+  <link rel="stylesheet" href="/admin/static/style.css">
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/admin/"><span class="brand-mark small">SM</span><span>订阅管理</span></a><nav><a href="/admin/">返回列表</a></nav></header>
+  <main class="container narrow">
+    <div class="page-heading"><div><h1>系统设置</h1><p>配置日志保留策略和反向代理信任范围。</p></div></div>
+    {{if .Message}}<div class="alert alert-success">{{.Message}}</div>{{end}}
+    {{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}
+    <form method="post" action="/admin/settings" class="form-card stack">
+      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <label><span>访问日志保留天数</span><input type="number" name="log_retention_days" min="0" max="36500" value="{{.Settings.LogRetentionDays}}" required><small>默认 90 天；设置为 0 表示永久保留。清理日志不会重置累计拉取次数。</small></label>
+      <label><span>可信代理 IP / CIDR</span><textarea name="trusted_proxies" rows="8" spellcheck="false" placeholder="例如：&#10;172.18.0.0/16&#10;127.0.0.1/32">{{.Settings.TrustedProxies}}</textarea><small>每行一个。只有来自这些地址的请求才会读取 X-Forwarded-For、X-Real-IP 和 X-Forwarded-Proto。</small></label>
+      <div class="alert alert-info">如果直接将服务端口暴露到公网，请留空可信代理。使用 Nginx、Caddy 或 Cloudflare 时，只填写实际代理到本服务的网段。</div>
+      <div class="form-actions"><a class="button" href="/admin/">取消</a><button type="submit" class="button primary">保存设置</button></div>
+    </form>
+  </main>
+</body>
+</html>
