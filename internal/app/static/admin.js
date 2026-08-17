@@ -42,22 +42,6 @@
     });
   });
 
-  document.querySelectorAll('[data-go-back]').forEach((button) => {
-    button.addEventListener('click', () => {
-      let sameSiteReferrer = false;
-      try {
-        sameSiteReferrer = Boolean(document.referrer) && new URL(document.referrer).origin === window.location.origin;
-      } catch (_) {
-        sameSiteReferrer = false;
-      }
-      if (sameSiteReferrer && window.history.length > 1) {
-        window.history.back();
-      } else {
-        window.location.assign(button.dataset.fallback || '/admin/');
-      }
-    });
-  });
-
   const qrDialog = document.querySelector('#qr-dialog');
   const qrImage = document.querySelector('[data-qr-code]');
   const qrTitle = document.querySelector('[data-qr-title]');

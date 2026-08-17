@@ -8,7 +8,7 @@
   <script defer src="/admin/static/admin.js"></script>
 </head>
 <body>
-  <header class="topbar"><a class="brand" href="/admin/"><span class="brand-mark small">SM</span><span>订阅管理</span></a><nav><button type="button" class="link-button" data-go-back data-fallback="/admin/">← 返回上一页</button><a href="/admin/">返回列表</a></nav></header>
+  <header class="topbar"><a class="brand" href="/admin/"><span class="brand-mark small">SM</span><span>订阅管理</span></a><nav><a href="/admin/">返回列表</a></nav></header>
   <main class="container">
     <div class="page-heading">
       <div><h1>{{.Subscription.Name}} · 访问日志</h1><p><code>{{.Subscription.Path}}</code> · 累计拉取 <strong>{{.Subscription.FetchCount}}</strong> 次 · 最后拉取 {{formatTime .Subscription.LastFetchedAt}}</p></div>
