@@ -14,7 +14,7 @@
 - 拉取次数、最后拉取时间和最后拉取 IP
 - 访问日志分页、IP 搜索、客户端筛选和清理
 - HTTP 和 HTTPS 环境均可一键复制订阅地址
-- 可配置日志保留天数及可信反向代理网段
+- 可配置日志保留天数及可信反向代理网段，安全记录真实客户端 IP
 - SQLite 持久化、CSRF 防护、登录限速和安全 Cookie
 
 > Base64 是编码，不是加密。订阅地址和节点内容都应视为敏感信息，公网部署请使用 HTTPS，并使用不容易猜到的随机路径。
@@ -55,6 +55,7 @@ http://服务器地址:8080/ss
 | `DATABASE_PATH` | 空 | 自定义数据库完整路径，设置后优先于 `DATA_DIR` |
 | `BASE_URL` | 自动识别 | 后台显示和复制订阅地址时使用的外部基础 URL |
 | `COOKIE_SECURE` | `auto` | `true`、`false` 或 `auto`；HTTPS 公网部署建议设为 `true` |
+| `TRUSTED_PROXIES` | 空 | 逗号分隔的可信代理 IP/CIDR；默认不信任任何代理 |
 | `TZ` | `Asia/Shanghai` | 页面时间显示时区 |
 
 使用反向代理时，建议将 `BASE_URL` 设置为外部地址，例如：
@@ -63,19 +64,81 @@ http://服务器地址:8080/ss
 environment:
   BASE_URL: https://sub.example.com
   COOKIE_SECURE: "true"
+  TRUSTED_PROXIES: 172.17.0.1/32
 ```
 
-然后在后台“系统设置”中加入真正连接到本服务的代理 IP 或网段。只有可信代理发送的 `X-Forwarded-For`、`X-Real-IP` 和 `X-Forwarded-Proto` 会被采用。
+`TRUSTED_PROXIES` 支持单个 IPv4、IPv6 和 CIDR，例如：
+
+```dotenv
+TRUSTED_PROXIES=172.17.0.1/32,10.0.0.0/8,2001:db8::1/128
+```
+
+配置会在启动时校验；无效 IP/CIDR 会使程序明确报错退出。登录后台后，也可以在“系统设置 → 可信代理 IP / CIDR”中配置，支持逗号或换行分隔，保存后立即生效。页面配置保存在数据库中，并与环境变量合并；两处均为空时不信任任何代理。
+
+应用先检查 TCP `RemoteAddr`。只有直接连接方命中可信范围时，才会从右向左检查 `X-Forwarded-For`，跳过可信代理并取第一个不受信任的有效地址；没有 `X-Forwarded-For` 时才会接受单一、有效的 `X-Real-IP`。代理头缺失或畸形时回退到 `RemoteAddr`。
+
+> **安全警告：** 启用可信代理后，不要让不可信公网客户端绕过 Caddy 直接访问应用端口。否则当其连接地址落入可信范围时，可能伪造 IP 请求头。不要信任全部私网，只配置真正连接到应用的代理 IP 或最小网段。
 
 ## Caddy HTTPS 示例
 
 ```caddyfile
 sub.example.com {
-    reverse_proxy 127.0.0.1:8080
+    reverse_proxy 172.17.0.1:8081
 }
 ```
 
-如果 Caddy 和服务都在 Docker 网络内，应把该 Docker 网络的 CIDR 加入后台可信代理，而不是盲目信任所有地址。
+上述现有拓扑需要设置 `TRUSTED_PROXIES=172.17.0.1/32`，并通过防火墙确保宿主机 8081 不可被公网直接访问。
+
+更推荐让 Caddy 和 SubManager 使用同一个自定义 Docker 网络，Caddy 直接访问 `sub-manager:8080`，SubManager 不配置 `ports` 公网映射。下面是可直接调整的 Compose 示例：
+
+```yaml
+services:
+  sub-manager:
+    image: saitomikuya/sub-manager:1.0.1
+    restart: unless-stopped
+    expose:
+      - "8080"
+    environment:
+      BASE_URL: https://sub.example.com
+      COOKIE_SECURE: "true"
+      TRUSTED_PROXIES: 172.30.0.2/32
+    volumes:
+      - sub-manager-data:/data
+    networks:
+      proxy:
+        ipv4_address: 172.30.0.3
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    networks:
+      proxy:
+        ipv4_address: 172.30.0.2
+
+networks:
+  proxy:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+volumes:
+  sub-manager-data:
+  caddy-data:
+```
+
+对应的 `Caddyfile`：
+
+```caddyfile
+sub.example.com {
+    reverse_proxy sub-manager:8080
+}
+```
 
 ## 日志与隐私
 

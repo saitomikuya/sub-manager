@@ -42,7 +42,7 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		a.renderError(w, http.StatusInternalServerError, "无法读取系统设置")
 		return
 	}
-	ip := clientIPForRequest(r, settings.TrustedProxies)
+	ip := a.clientIP(r)
 	if !a.limiter.allowed(ip) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		a.render(w, "login.html", viewData{Title: "管理员登录", Error: "登录失败次数过多，请 15 分钟后重试"})
@@ -166,7 +166,7 @@ func (a *App) dashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	a.render(w, "dashboard.html", viewData{
 		Title: "订阅管理", CSRF: auth.Session.CSRFToken, Subscriptions: subscriptions,
-		BaseURL: a.baseURL(r, auth.Config.TrustedProxies), Message: message,
+		BaseURL: a.baseURL(r), Message: message,
 	})
 }
 
@@ -318,12 +318,11 @@ func (a *App) previewSubscription(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) subscriptionQRCode(w http.ResponseWriter, r *http.Request) {
-	auth, _ := getAuth(r)
 	sub, ok := a.loadSubscription(w, r)
 	if !ok {
 		return
 	}
-	subscriptionURL := a.baseURL(r, auth.Config.TrustedProxies) + sub.Path
+	subscriptionURL := a.baseURL(r) + sub.Path
 	png, err := qrcode.Encode(subscriptionQRPayload(subscriptionURL), qrcode.Medium, 320)
 	if err != nil {
 		a.renderError(w, http.StatusInternalServerError, "无法生成订阅二维码")
@@ -383,14 +382,15 @@ func (a *App) settingsPage(w http.ResponseWriter, r *http.Request) {
 	auth, _ := getAuth(r)
 	a.render(w, "settings.html", viewData{
 		Title: "系统设置", CSRF: auth.Session.CSRFToken, Settings: auth.Config,
-		Message: messageFromQuery(r.URL.Query().Get("message")),
+		EnvTrustedProxies: a.cfg.TrustedProxies,
+		Message:           messageFromQuery(r.URL.Query().Get("message")),
 	})
 }
 
 func (a *App) updateSettings(w http.ResponseWriter, r *http.Request) {
 	auth, _ := getAuth(r)
 	retention, err := strconv.Atoi(r.FormValue("log_retention_days"))
-	data := viewData{Title: "系统设置", CSRF: auth.Session.CSRFToken, Settings: auth.Config}
+	data := viewData{Title: "系统设置", CSRF: auth.Session.CSRFToken, Settings: auth.Config, EnvTrustedProxies: a.cfg.TrustedProxies}
 	if err != nil || retention < 0 || retention > 36500 {
 		data.Error = "日志保留天数必须是 0 到 36500 之间的整数"
 		w.WriteHeader(http.StatusBadRequest)
@@ -410,6 +410,10 @@ func (a *App) updateSettings(w http.ResponseWriter, r *http.Request) {
 		a.renderError(w, http.StatusInternalServerError, "无法保存系统设置")
 		return
 	}
+	if err := a.ipResolver.setConfigured(proxies); err != nil {
+		a.renderError(w, http.StatusInternalServerError, "无法应用可信代理设置")
+		return
+	}
 	http.Redirect(w, r, "/admin/settings?message=settings-updated", http.StatusSeeOther)
 }
 
@@ -427,11 +431,6 @@ func (a *App) publicSubscription(w http.ResponseWriter, r *http.Request) {
 		a.renderError(w, http.StatusInternalServerError, "无法读取订阅")
 		return
 	}
-	settings, err := a.store.Settings(r.Context())
-	if err != nil {
-		a.renderError(w, http.StatusInternalServerError, "无法读取系统设置")
-		return
-	}
 	userAgent := r.UserAgent()
 	if len(userAgent) > 1024 {
 		userAgent = userAgent[:1024]
@@ -439,7 +438,7 @@ func (a *App) publicSubscription(w http.ResponseWriter, r *http.Request) {
 			userAgent = userAgent[:len(userAgent)-1]
 		}
 	}
-	ip := clientIPForRequest(r, settings.TrustedProxies)
+	ip := a.clientIP(r)
 	if err := a.store.RecordAccess(r.Context(), sub.ID, ip, detectClient(userAgent), userAgent, r.Method, http.StatusOK); err != nil {
 		a.logger.Error("record subscription access", "subscription_id", sub.ID, "error", err)
 		a.renderError(w, http.StatusInternalServerError, "暂时无法生成订阅")
@@ -476,12 +475,12 @@ func subscriptionFromForm(r *http.Request) Subscription {
 	}
 }
 
-func (a *App) baseURL(r *http.Request, trustedProxies string) string {
+func (a *App) baseURL(r *http.Request) string {
 	if a.cfg.BaseURL != "" {
 		return a.cfg.BaseURL
 	}
 	scheme := "http"
-	if r.TLS != nil || (trustedIP(remoteIP(r), parseNetworks(trustedProxies)) && strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]), "https")) {
+	if r.TLS != nil || (a.requestNetworkInfo(r).FromTrustedProxy && strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]), "https")) {
 		scheme = "https"
 	}
 	host := r.Host

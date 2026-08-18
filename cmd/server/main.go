@@ -45,7 +45,7 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("server started", "addr", cfg.Addr, "database", cfg.DatabasePath)
+		logger.Info("server started", "version", app.Version, "addr", cfg.Addr, "database", cfg.DatabasePath)
 		errCh <- server.ListenAndServe()
 	}()
 

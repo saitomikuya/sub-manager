@@ -5,3 +5,4 @@
 /sub-manager
 /server
 .DS_Store
+.env

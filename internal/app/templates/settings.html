@@ -15,8 +15,10 @@
     <form method="post" action="/admin/settings" class="form-card stack">
       <input type="hidden" name="csrf_token" value="{{.CSRF}}">
       <label><span>访问日志保留天数</span><input type="number" name="log_retention_days" min="0" max="36500" value="{{.Settings.LogRetentionDays}}" required><small>默认 90 天；设置为 0 表示永久保留。清理日志不会重置累计拉取次数。</small></label>
-      <label><span>可信代理 IP / CIDR</span><textarea name="trusted_proxies" rows="8" spellcheck="false" placeholder="例如：&#10;172.18.0.0/16&#10;127.0.0.1/32">{{.Settings.TrustedProxies}}</textarea><small>每行一个。只有来自这些地址的请求才会读取 X-Forwarded-For、X-Real-IP 和 X-Forwarded-Proto。</small></label>
-      <div class="alert alert-info">如果直接将服务端口暴露到公网，请留空可信代理。使用 Nginx、Caddy 或 Cloudflare 时，只填写实际代理到本服务的网段。</div>
+      <label><span>可信代理 IP / CIDR</span><textarea name="trusted_proxies" rows="8" spellcheck="false" placeholder="例如：&#10;172.17.0.1/32&#10;10.0.0.0/8">{{.Settings.TrustedProxies}}</textarea><small>支持逗号或换行分隔，保存后立即生效，无需重启。留空表示面板不信任任何代理。</small></label>
+      <div class="alert alert-info">部署环境追加的 <code>TRUSTED_PROXIES</code>：{{if .EnvTrustedProxies}}<code>{{.EnvTrustedProxies}}</code>{{else}}未配置{{end}}。环境变量与面板配置合并，需在容器部署配置中修改。</div>
+      <small>只有直接连接方命中上述可信范围时，应用才会读取 <code>X-Forwarded-For</code> 或 <code>X-Real-IP</code>。</small>
+      <div class="alert alert-info">如果应用端口可被不可信公网客户端直接访问，请不要信任会从该端口连接的地址或网段，否则客户端可能伪造 IP 请求头。</div>
       <div class="form-actions"><a class="button" href="/admin/">取消</a><button type="submit" class="button primary">保存设置</button></div>
     </form>
   </main>

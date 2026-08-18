@@ -2,7 +2,6 @@ package app
 
 import (
 	"errors"
-	"net"
 	"net/http"
 	"regexp"
 	"strings"
@@ -73,99 +72,7 @@ func detectClient(userAgent string) string {
 }
 
 func normalizeTrustedProxies(value string) (string, error) {
-	parts := strings.FieldsFunc(value, func(r rune) bool {
-		return r == ',' || r == '\n' || r == '\r' || r == ' ' || r == '\t'
-	})
-	seen := make(map[string]bool)
-	result := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		if !strings.Contains(part, "/") {
-			ip := net.ParseIP(part)
-			if ip == nil {
-				return "", errors.New("可信代理必须是有效的 IP 或 CIDR")
-			}
-			if ip.To4() != nil {
-				part = ip.String() + "/32"
-			} else {
-				part = ip.String() + "/128"
-			}
-		}
-		_, network, err := net.ParseCIDR(part)
-		if err != nil {
-			return "", errors.New("可信代理必须是有效的 IP 或 CIDR")
-		}
-		canonical := network.String()
-		if !seen[canonical] {
-			seen[canonical] = true
-			result = append(result, canonical)
-		}
-	}
-	return strings.Join(result, "\n"), nil
-}
-
-func parseNetworks(value string) []*net.IPNet {
-	parts := strings.Fields(value)
-	result := make([]*net.IPNet, 0, len(parts))
-	for _, part := range parts {
-		_, network, err := net.ParseCIDR(part)
-		if err == nil {
-			result = append(result, network)
-		}
-	}
-	return result
-}
-
-func trustedIP(ip net.IP, networks []*net.IPNet) bool {
-	for _, network := range networks {
-		if network.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-func remoteIP(r *http.Request) net.IP {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	return net.ParseIP(strings.TrimSpace(host))
-}
-
-func clientIPForRequest(r *http.Request, trustedProxyText string) string {
-	remote := remoteIP(r)
-	if remote == nil {
-		return "unknown"
-	}
-	networks := parseNetworks(trustedProxyText)
-	if !trustedIP(remote, networks) {
-		return remote.String()
-	}
-
-	chain := make([]net.IP, 0)
-	for _, item := range strings.Split(r.Header.Get("X-Forwarded-For"), ",") {
-		if ip := net.ParseIP(strings.TrimSpace(item)); ip != nil {
-			chain = append(chain, ip)
-		}
-	}
-	if len(chain) == 0 {
-		if ip := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); ip != nil {
-			return ip.String()
-		}
-		return remote.String()
-	}
-	// Walk from the application outward. The first untrusted hop is the client;
-	// anything further left may have been supplied by that client.
-	for i := len(chain) - 1; i >= 0; i-- {
-		if !trustedIP(chain[i], networks) {
-			return chain[i].String()
-		}
-	}
-	return chain[0].String()
+	return canonicalTrustedProxies(value)
 }
 
 func (a *App) isSecureRequest(r *http.Request) bool {
@@ -178,8 +85,7 @@ func (a *App) isSecureRequest(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	settings, err := a.store.Settings(r.Context())
-	if err != nil || !trustedIP(remoteIP(r), parseNetworks(settings.TrustedProxies)) {
+	if !a.requestNetworkInfo(r).FromTrustedProxy {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]), "https")

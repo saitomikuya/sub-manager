@@ -21,30 +21,32 @@ import (
 var webFiles embed.FS
 
 type App struct {
-	cfg       Config
-	store     *Store
-	logger    *slog.Logger
-	templates *template.Template
-	limiter   *loginLimiter
-	cancel    context.CancelFunc
+	cfg        Config
+	store      *Store
+	logger     *slog.Logger
+	templates  *template.Template
+	limiter    *loginLimiter
+	ipResolver *clientIPResolver
+	cancel     context.CancelFunc
 }
 
 type viewData struct {
-	Title         string
-	CSRF          string
-	Error         string
-	Message       string
-	MustChange    bool
-	Subscriptions []Subscription
-	Subscription  Subscription
-	IsNew         bool
-	BaseURL       string
-	Logs          LogPage
-	FilterIP      string
-	FilterClient  string
-	PrevPage      int
-	NextPage      int
-	Settings      Settings
+	Title             string
+	CSRF              string
+	Error             string
+	Message           string
+	MustChange        bool
+	Subscriptions     []Subscription
+	Subscription      Subscription
+	IsNew             bool
+	BaseURL           string
+	Logs              LogPage
+	FilterIP          string
+	FilterClient      string
+	PrevPage          int
+	NextPage          int
+	Settings          Settings
+	EnvTrustedProxies string
 }
 
 type authContext struct {
@@ -66,6 +68,20 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	ipResolver, err := newClientIPResolver(cfg.TrustedProxies)
+	if err != nil {
+		store.Close()
+		return nil, fmt.Errorf("trusted proxies: %w", err)
+	}
+	settings, err := store.Settings(context.Background())
+	if err != nil {
+		store.Close()
+		return nil, fmt.Errorf("load settings: %w", err)
+	}
+	if err := ipResolver.setConfigured(settings.TrustedProxies); err != nil {
+		store.Close()
+		return nil, fmt.Errorf("stored trusted proxies: %w", err)
+	}
 	funcs := template.FuncMap{
 		"formatTime": func(t *time.Time) string {
 			if t == nil {
@@ -85,7 +101,7 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &App{
 		cfg: cfg, store: store, logger: logger, templates: templates,
-		limiter: newLoginLimiter(), cancel: cancel,
+		limiter: newLoginLimiter(), ipResolver: ipResolver, cancel: cancel,
 	}
 	go a.cleanupLoop(ctx)
 	return a, nil
@@ -125,7 +141,7 @@ func (a *App) Handler() http.Handler {
 	mux.Handle("POST /admin/settings", a.requireAdmin(a.requireCSRF(http.HandlerFunc(a.updateSettings))))
 	mux.HandleFunc("GET /", a.publicSubscription)
 
-	return a.securityHeaders(a.requestLogger(mux))
+	return a.securityHeaders(a.clientIPMiddleware(a.requestLogger(mux)))
 }
 
 func (a *App) cleanupLoop(ctx context.Context) {
@@ -196,7 +212,7 @@ func (a *App) requestLogger(next http.Handler) http.Handler {
 			if strings.HasPrefix(r.URL.Path, "/admin") {
 				loggedPath = r.URL.Path
 			}
-			a.logger.Info("request", "method", r.Method, "path", loggedPath, "duration_ms", time.Since(start).Milliseconds())
+			a.logger.Info("request", "method", r.Method, "path", loggedPath, "client_ip", a.clientIP(r), "duration_ms", time.Since(start).Milliseconds())
 		}
 	})
 }
