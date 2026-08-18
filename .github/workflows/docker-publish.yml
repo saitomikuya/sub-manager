@@ -2,6 +2,11 @@ name: Build and publish Docker image
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: Version tag without the v prefix
+        required: true
+        default: 1.0.1
 
 permissions:
   contents: read
@@ -12,6 +17,31 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: |
+          go test -race -count=1 ./...
+          go vet ./...
+
+      - name: Validate release input
+        id: release
+        shell: bash
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          version="$VERSION_INPUT"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid semantic version: $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -25,21 +55,102 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Generate image metadata
-        id: metadata
-        uses: docker/metadata-action@v6
-        with:
-          images: saitomikuya/sub-manager
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix=sha-
-            type=ref,event=tag
+      - name: Preserve the previous release as 1.0.0
+        shell: bash
+        run: |
+          if docker buildx imagetools inspect saitomikuya/sub-manager:1.0.0 >/dev/null 2>&1; then
+            echo "saitomikuya/sub-manager:1.0.0 already exists"
+            exit 0
+          fi
+          previous_digest="$(docker buildx imagetools inspect saitomikuya/sub-manager:latest | awk '/^Digest:/ {print $2; exit}')"
+          if [[ ! "$previous_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Unable to resolve the current latest digest" >&2
+            exit 1
+          fi
+          docker buildx imagetools create \
+            --tag saitomikuya/sub-manager:1.0.0 \
+            "saitomikuya/sub-manager@$previous_digest"
 
-      - name: Build and push image
+      - name: Build and push versioned image
         uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.metadata.outputs.tags }}
-          labels: ${{ steps.metadata.outputs.labels }}
+          tags: |
+            saitomikuya/sub-manager:${{ steps.release.outputs.version }}
+            saitomikuya/sub-manager:sha-${{ steps.release.outputs.short_sha }}
+          build-args: |
+            VERSION=${{ steps.release.outputs.version }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify platforms and run the versioned image
+        shell: bash
+        run: |
+          image="saitomikuya/sub-manager:${{ steps.release.outputs.version }}"
+          manifest="$(docker buildx imagetools inspect "$image")"
+          grep -q 'linux/amd64' <<<"$manifest"
+          grep -q 'linux/arm64' <<<"$manifest"
+
+          docker pull "$image"
+          container="sub-manager-release-smoke-${GITHUB_RUN_ID}"
+          cleanup() {
+            docker rm -f "$container" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker run -d --name "$container" \
+            --tmpfs /data \
+            -p 127.0.0.1:18080:8080 \
+            "$image"
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:18080/healthz >/dev/null; then
+              break
+            fi
+            if [[ "$attempt" == 30 ]]; then
+              docker logs "$container"
+              exit 1
+            fi
+            sleep 1
+          done
+          curl --silent --output /dev/null \
+            -H 'X-Forwarded-For: 203.0.113.10' \
+            http://127.0.0.1:18080/not-found
+          for attempt in {1..10}; do
+            if docker logs "$container" 2>&1 | grep -q 'client_ip=203.0.113.10'; then
+              break
+            fi
+            if [[ "$attempt" == 10 ]]; then
+              docker logs "$container"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          if docker run --rm -e TRUSTED_PROXIES=not-an-ip "$image"; then
+            echo "Invalid TRUSTED_PROXIES unexpectedly started" >&2
+            exit 1
+          fi
+
+      - name: Update latest after verification
+        shell: bash
+        run: |
+          version="${{ steps.release.outputs.version }}"
+          docker buildx imagetools create \
+            --tag saitomikuya/sub-manager:latest \
+            "saitomikuya/sub-manager:$version"
+          version_digest="$(docker buildx imagetools inspect "saitomikuya/sub-manager:$version" | awk '/^Digest:/ {print $2; exit}')"
+          latest_digest="$(docker buildx imagetools inspect saitomikuya/sub-manager:latest | awk '/^Digest:/ {print $2; exit}')"
+          if [[ -z "$version_digest" || "$version_digest" != "$latest_digest" ]]; then
+            echo "latest digest does not match the versioned image" >&2
+            exit 1
+          fi
+          {
+            echo "## Published image"
+            echo
+            echo "- Version: \`saitomikuya/sub-manager:$version\`"
+            echo "- Latest: \`saitomikuya/sub-manager:latest\`"
+            echo "- Digest: \`$version_digest\`"
+            echo "- Platforms: \`linux/amd64\`, \`linux/arm64\`"
+          } >> "$GITHUB_STEP_SUMMARY"
