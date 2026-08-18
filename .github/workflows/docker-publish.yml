@@ -57,19 +57,39 @@ jobs:
 
       - name: Preserve the previous release as 1.0.0
         shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN_RELEASE }}
         run: |
-          if docker buildx imagetools inspect saitomikuya/sub-manager:1.0.0 >/dev/null 2>&1; then
+          registry_token="$(curl --fail --silent --show-error --get \
+            --user "$DOCKERHUB_USERNAME:$DOCKERHUB_TOKEN" \
+            --data-urlencode 'service=registry.docker.io' \
+            --data-urlencode 'scope=repository:saitomikuya/sub-manager:pull,push' \
+            https://auth.docker.io/token | jq -er '.token // .access_token')"
+          accept='application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
+          registry='https://registry-1.docker.io/v2/saitomikuya/sub-manager/manifests'
+          if [[ "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            -H "Authorization: Bearer $registry_token" -H "Accept: $accept" \
+            "$registry/1.0.0")" == 200 ]]; then
             echo "saitomikuya/sub-manager:1.0.0 already exists"
             exit 0
           fi
-          previous_digest="$(docker buildx imagetools inspect saitomikuya/sub-manager:latest | awk '/^Digest:/ {print $2; exit}')"
-          if [[ ! "$previous_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "Unable to resolve the current latest digest" >&2
+          release_dir="$(mktemp -d)"
+          trap 'rm -rf "$release_dir"' EXIT
+          curl --fail --silent --show-error \
+            -D "$release_dir/headers" -o "$release_dir/manifest" \
+            -H "Authorization: Bearer $registry_token" -H "Accept: $accept" \
+            "$registry/latest"
+          media_type="$(awk -F': ' 'tolower($1) == "content-type" {gsub("\\r", "", $2); print $2}' "$release_dir/headers" | tail -1)"
+          if [[ -z "$media_type" ]]; then
+            echo "Unable to resolve the latest manifest media type" >&2
             exit 1
           fi
-          docker buildx imagetools create \
-            --tag saitomikuya/sub-manager:1.0.0 \
-            "saitomikuya/sub-manager@$previous_digest"
+          curl --fail --silent --show-error --request PUT \
+            -H "Authorization: Bearer $registry_token" \
+            -H "Content-Type: $media_type" \
+            --data-binary "@$release_dir/manifest" \
+            "$registry/1.0.0" >/dev/null
 
       - name: Build and push versioned image
         uses: docker/build-push-action@v7
@@ -88,11 +108,23 @@ jobs:
 
       - name: Verify platforms and run the versioned image
         shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN_RELEASE }}
         run: |
           image="saitomikuya/sub-manager:${{ steps.release.outputs.version }}"
-          manifest="$(docker buildx imagetools inspect "$image")"
-          grep -q 'linux/amd64' <<<"$manifest"
-          grep -q 'linux/arm64' <<<"$manifest"
+          registry_token="$(curl --fail --silent --show-error --get \
+            --user "$DOCKERHUB_USERNAME:$DOCKERHUB_TOKEN" \
+            --data-urlencode 'service=registry.docker.io' \
+            --data-urlencode 'scope=repository:saitomikuya/sub-manager:pull,push' \
+            https://auth.docker.io/token | jq -er '.token // .access_token')"
+          accept='application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json'
+          registry='https://registry-1.docker.io/v2/saitomikuya/sub-manager/manifests'
+          manifest="$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $registry_token" -H "Accept: $accept" \
+            "$registry/${{ steps.release.outputs.version }}")"
+          jq -e 'any(.manifests[]; .platform.os == "linux" and .platform.architecture == "amd64")' <<<"$manifest" >/dev/null
+          jq -e 'any(.manifests[]; .platform.os == "linux" and .platform.architecture == "arm64")' <<<"$manifest" >/dev/null
 
           docker pull "$image"
           container="sub-manager-release-smoke-${GITHUB_RUN_ID}"
@@ -135,13 +167,40 @@ jobs:
 
       - name: Update latest after verification
         shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN_RELEASE }}
         run: |
           version="${{ steps.release.outputs.version }}"
-          docker buildx imagetools create \
-            --tag saitomikuya/sub-manager:latest \
-            "saitomikuya/sub-manager:$version"
-          version_digest="$(docker buildx imagetools inspect "saitomikuya/sub-manager:$version" | awk '/^Digest:/ {print $2; exit}')"
-          latest_digest="$(docker buildx imagetools inspect saitomikuya/sub-manager:latest | awk '/^Digest:/ {print $2; exit}')"
+          registry_token="$(curl --fail --silent --show-error --get \
+            --user "$DOCKERHUB_USERNAME:$DOCKERHUB_TOKEN" \
+            --data-urlencode 'service=registry.docker.io' \
+            --data-urlencode 'scope=repository:saitomikuya/sub-manager:pull,push' \
+            https://auth.docker.io/token | jq -er '.token // .access_token')"
+          accept='application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
+          registry='https://registry-1.docker.io/v2/saitomikuya/sub-manager/manifests'
+          release_dir="$(mktemp -d)"
+          trap 'rm -rf "$release_dir"' EXIT
+          curl --fail --silent --show-error \
+            -D "$release_dir/headers" -o "$release_dir/manifest" \
+            -H "Authorization: Bearer $registry_token" -H "Accept: $accept" \
+            "$registry/$version"
+          media_type="$(awk -F': ' 'tolower($1) == "content-type" {gsub("\\r", "", $2); print $2}' "$release_dir/headers" | tail -1)"
+          if [[ -z "$media_type" ]]; then
+            echo "Unable to resolve the version manifest media type" >&2
+            exit 1
+          fi
+          curl --fail --silent --show-error --request PUT \
+            -H "Authorization: Bearer $registry_token" \
+            -H "Content-Type: $media_type" \
+            --data-binary "@$release_dir/manifest" \
+            "$registry/latest" >/dev/null
+          version_digest="$(curl --fail --silent --show-error --head \
+            -H "Authorization: Bearer $registry_token" -H "Accept: $accept" \
+            "$registry/$version" | awk -F': ' 'tolower($1) == "docker-content-digest" {gsub("\\r", "", $2); print $2}')"
+          latest_digest="$(curl --fail --silent --show-error --head \
+            -H "Authorization: Bearer $registry_token" -H "Accept: $accept" \
+            "$registry/latest" | awk -F': ' 'tolower($1) == "docker-content-digest" {gsub("\\r", "", $2); print $2}')"
           if [[ -z "$version_digest" || "$version_digest" != "$latest_digest" ]]; then
             echo "latest digest does not match the versioned image" >&2
             exit 1
