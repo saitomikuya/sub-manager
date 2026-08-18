@@ -133,7 +133,7 @@ jobs:
           }
           trap cleanup EXIT
           docker run -d --name "$container" \
-            --tmpfs /data \
+            --tmpfs /data:rw,uid=10001,gid=10001,mode=0700 \
             -p 127.0.0.1:18080:8080 \
             "$image"
           for attempt in {1..30}; do
