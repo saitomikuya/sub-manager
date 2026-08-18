@@ -47,6 +47,7 @@ type viewData struct {
 	NextPage          int
 	Settings          Settings
 	EnvTrustedProxies string
+	TrustAllByDefault bool
 }
 
 type authContext struct {
@@ -68,7 +69,7 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	ipResolver, err := newClientIPResolver(cfg.TrustedProxies)
+	ipResolver, err := newClientIPResolver(cfg.TrustedProxies, cfg.TrustAllByDefault)
 	if err != nil {
 		store.Close()
 		return nil, fmt.Errorf("trusted proxies: %w", err)

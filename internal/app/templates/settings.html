@@ -15,10 +15,10 @@
     <form method="post" action="/admin/settings" class="form-card stack">
       <input type="hidden" name="csrf_token" value="{{.CSRF}}">
       <label><span>访问日志保留天数</span><input type="number" name="log_retention_days" min="0" max="36500" value="{{.Settings.LogRetentionDays}}" required><small>默认 90 天；设置为 0 表示永久保留。清理日志不会重置累计拉取次数。</small></label>
-      <label><span>可信代理 IP / CIDR</span><textarea name="trusted_proxies" rows="8" spellcheck="false" placeholder="例如：&#10;172.17.0.1/32&#10;10.0.0.0/8">{{.Settings.TrustedProxies}}</textarea><small>支持逗号或换行分隔，保存后立即生效，无需重启。留空表示面板不信任任何代理。</small></label>
-      <div class="alert alert-info">部署环境追加的 <code>TRUSTED_PROXIES</code>：{{if .EnvTrustedProxies}}<code>{{.EnvTrustedProxies}}</code>{{else}}未配置{{end}}。环境变量与面板配置合并，需在容器部署配置中修改。</div>
-      <small>只有直接连接方命中上述可信范围时，应用才会读取 <code>X-Forwarded-For</code> 或 <code>X-Real-IP</code>。</small>
-      <div class="alert alert-info">如果应用端口可被不可信公网客户端直接访问，请不要信任会从该端口连接的地址或网段，否则客户端可能伪造 IP 请求头。</div>
+      <label><span>可信代理 IP / CIDR（可选）</span><textarea name="trusted_proxies" rows="8" spellcheck="false" placeholder="例如：&#10;172.17.0.1/32&#10;10.0.0.0/8">{{.Settings.TrustedProxies}}</textarea><small>支持逗号或换行分隔，保存后立即生效，无需重启。{{if .TrustAllByDefault}}留空时默认信任所有直接来源；填写后仅信任所填范围。{{else}}与部署环境配置合并。{{end}}</small></label>
+      <div class="alert alert-info">部署环境的 <code>TRUSTED_PROXIES</code>：{{if .EnvTrustedProxies}}<code>{{.EnvTrustedProxies}}</code>{{else}}未配置，当前默认信任所有 IPv4/IPv6 直接来源{{end}}。</div>
+      <small>默认信任全部时会读取任意直接来源的代理头；填写范围后，只有直接连接方命中范围时才会读取。</small>
+      <div class="alert alert-error">默认信任所有来源时，任何能直连应用端口的客户端都可以伪造 IP 请求头。请确保应用端口只允许 Caddy 访问，且 Caddy 会覆盖客户端传入的转发头。</div>
       <div class="form-actions"><a class="button" href="/admin/">取消</a><button type="submit" class="button primary">保存设置</button></div>
     </form>
   </main>

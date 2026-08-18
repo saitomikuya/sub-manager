@@ -8,13 +8,14 @@ import (
 )
 
 type Config struct {
-	Addr           string
-	DatabasePath   string
-	BaseURL        string
-	CookieSecure   string
-	TrustedProxies string
-	SessionHours   int
-	DefaultRetain  int
+	Addr              string
+	DatabasePath      string
+	BaseURL           string
+	CookieSecure      string
+	TrustedProxies    string
+	TrustAllByDefault bool
+	SessionHours      int
+	DefaultRetain     int
 }
 
 func LoadConfig() (Config, error) {
@@ -33,11 +34,16 @@ func LoadConfig() (Config, error) {
 	if cfg.CookieSecure != "auto" && cfg.CookieSecure != "true" && cfg.CookieSecure != "false" {
 		return Config{}, fmt.Errorf("COOKIE_SECURE must be auto, true, or false")
 	}
-	trustedProxies, err := normalizeTrustedProxies(os.Getenv("TRUSTED_PROXIES"))
-	if err != nil {
-		return Config{}, fmt.Errorf("TRUSTED_PROXIES: %w", err)
+	rawTrustedProxies := strings.TrimSpace(os.Getenv("TRUSTED_PROXIES"))
+	if rawTrustedProxies == "" {
+		cfg.TrustAllByDefault = true
+	} else {
+		trustedProxies, err := normalizeTrustedProxies(rawTrustedProxies)
+		if err != nil {
+			return Config{}, fmt.Errorf("TRUSTED_PROXIES: %w", err)
+		}
+		cfg.TrustedProxies = trustedProxies
 	}
-	cfg.TrustedProxies = trustedProxies
 	return cfg, nil
 }
 

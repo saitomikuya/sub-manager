@@ -25,7 +25,8 @@ func newTestAppWithTrustedProxies(t *testing.T, trustedProxies string) *App {
 	t.Helper()
 	cfg := Config{
 		Addr: ":0", DatabasePath: filepath.Join(t.TempDir(), "app.db"), CookieSecure: "false",
-		TrustedProxies: trustedProxies, SessionHours: 12, DefaultRetain: 90,
+		TrustedProxies: trustedProxies, TrustAllByDefault: trustedProxies == "",
+		SessionHours: 12, DefaultRetain: 90,
 	}
 	application, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
@@ -192,6 +193,25 @@ func TestTrustedProxiesCanBeConfiguredFromAdminPanel(t *testing.T) {
 	if got, want := logs.Logs[0].ClientIP, "203.0.113.10"; got != want {
 		t.Fatalf("logged client IP = %q, want %q", got, want)
 	}
+
+	response = postForm(t, client, server.URL+"/admin/settings", url.Values{
+		"csrf_token": {csrf}, "log_retention_days": {"90"}, "trusted_proxies": {""},
+	})
+	assertStatus(t, response, http.StatusSeeOther)
+	response.Body.Close()
+	defaultID, err := application.store.CreateSubscription(context.Background(), "default-all", "/default-all", "ss://default", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request = httptest.NewRequest(http.MethodGet, "http://example.test/default-all", nil)
+	request.RemoteAddr = "198.51.100.20:54321"
+	request.Header.Set("X-Forwarded-For", "203.0.113.11")
+	recorder = httptest.NewRecorder()
+	application.Handler().ServeHTTP(recorder, request)
+	logs, err = application.store.AccessLogs(context.Background(), defaultID, 1, 50, "", "")
+	if err != nil || len(logs.Logs) != 1 || logs.Logs[0].ClientIP != "203.0.113.11" {
+		t.Fatalf("default-all access logs = %+v, error = %v", logs.Logs, err)
+	}
 }
 
 func TestBatchUpdateIsAtomicWhenAnIDIsMissing(t *testing.T) {
@@ -336,6 +356,9 @@ func TestTrustedProxiesEnvironmentValidation(t *testing.T) {
 	if cfg.TrustedProxies != want {
 		t.Fatalf("TRUSTED_PROXIES = %q, want %q", cfg.TrustedProxies, want)
 	}
+	if cfg.TrustAllByDefault {
+		t.Fatal("explicit TRUSTED_PROXIES unexpectedly enabled trust-all default")
+	}
 
 	for _, invalid := range []string{"*", "172.17.0.999", "10.0.0.0/99"} {
 		t.Run(invalid, func(t *testing.T) {
@@ -345,6 +368,27 @@ func TestTrustedProxiesEnvironmentValidation(t *testing.T) {
 				t.Fatalf("error = %v", err)
 			}
 		})
+	}
+}
+
+func TestTrustedProxiesDefaultToAllDirectPeers(t *testing.T) {
+	t.Setenv("TRUSTED_PROXIES", "")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.TrustAllByDefault || cfg.TrustedProxies != "" {
+		t.Fatalf("default proxy config = %+v", cfg)
+	}
+	resolver, err := newClientIPResolver(cfg.TrustedProxies, cfg.TrustAllByDefault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/ss", nil)
+	request.RemoteAddr = "198.51.100.20:8080"
+	request.Header.Set("X-Forwarded-For", "203.0.113.10")
+	if got, want := resolver.resolve(request).ClientIP, "203.0.113.10"; got != want {
+		t.Fatalf("default client IP = %q, want %q", got, want)
 	}
 }
 

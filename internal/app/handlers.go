@@ -383,6 +383,7 @@ func (a *App) settingsPage(w http.ResponseWriter, r *http.Request) {
 	a.render(w, "settings.html", viewData{
 		Title: "系统设置", CSRF: auth.Session.CSRFToken, Settings: auth.Config,
 		EnvTrustedProxies: a.cfg.TrustedProxies,
+		TrustAllByDefault: a.cfg.TrustAllByDefault,
 		Message:           messageFromQuery(r.URL.Query().Get("message")),
 	})
 }
@@ -390,7 +391,10 @@ func (a *App) settingsPage(w http.ResponseWriter, r *http.Request) {
 func (a *App) updateSettings(w http.ResponseWriter, r *http.Request) {
 	auth, _ := getAuth(r)
 	retention, err := strconv.Atoi(r.FormValue("log_retention_days"))
-	data := viewData{Title: "系统设置", CSRF: auth.Session.CSRFToken, Settings: auth.Config, EnvTrustedProxies: a.cfg.TrustedProxies}
+	data := viewData{
+		Title: "系统设置", CSRF: auth.Session.CSRFToken, Settings: auth.Config,
+		EnvTrustedProxies: a.cfg.TrustedProxies, TrustAllByDefault: a.cfg.TrustAllByDefault,
+	}
 	if err != nil || retention < 0 || retention > 36500 {
 		data.Error = "日志保留天数必须是 0 到 36500 之间的整数"
 		w.WriteHeader(http.StatusBadRequest)

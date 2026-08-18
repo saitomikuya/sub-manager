@@ -10,9 +10,10 @@ import (
 )
 
 type clientIPResolver struct {
-	mu          sync.RWMutex
-	environment []netip.Prefix
-	configured  []netip.Prefix
+	mu              sync.RWMutex
+	environment     []netip.Prefix
+	configured      []netip.Prefix
+	trustAllDefault bool
 }
 
 type requestNetworkInfo struct {
@@ -23,12 +24,16 @@ type requestNetworkInfo struct {
 
 type requestNetworkInfoContextKey struct{}
 
-func newClientIPResolver(environment string) (*clientIPResolver, error) {
+func newClientIPResolver(environment string, trustAllDefault ...bool) (*clientIPResolver, error) {
 	prefixes, err := parseTrustedProxyPrefixes(environment)
 	if err != nil {
 		return nil, err
 	}
-	return &clientIPResolver{environment: prefixes}, nil
+	resolver := &clientIPResolver{environment: prefixes}
+	if len(trustAllDefault) > 0 {
+		resolver.trustAllDefault = trustAllDefault[0]
+	}
+	return resolver, nil
 }
 
 func (r *clientIPResolver) setConfigured(value string) error {
@@ -62,13 +67,22 @@ func (r *clientIPResolver) isTrusted(addr netip.Addr) bool {
 	return false
 }
 
+func (r *clientIPResolver) isTrustedPeer(addr netip.Addr) bool {
+	if r.isTrusted(addr) {
+		return true
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.trustAllDefault && len(r.environment) == 0 && len(r.configured) == 0
+}
+
 func (r *clientIPResolver) resolve(request *http.Request) requestNetworkInfo {
 	remote, ok := parseRemoteIP(request.RemoteAddr)
 	if !ok {
 		return requestNetworkInfo{ClientIP: "unknown"}
 	}
 	info := requestNetworkInfo{ClientIP: remote.String(), RemoteIP: remote}
-	if !r.isTrusted(remote) {
+	if !r.isTrustedPeer(remote) {
 		return info
 	}
 	info.FromTrustedProxy = true

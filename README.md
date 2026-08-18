@@ -55,7 +55,7 @@ http://服务器地址:8080/ss
 | `DATABASE_PATH` | 空 | 自定义数据库完整路径，设置后优先于 `DATA_DIR` |
 | `BASE_URL` | 自动识别 | 后台显示和复制订阅地址时使用的外部基础 URL |
 | `COOKIE_SECURE` | `auto` | `true`、`false` 或 `auto`；HTTPS 公网部署建议设为 `true` |
-| `TRUSTED_PROXIES` | 空 | 逗号分隔的可信代理 IP/CIDR；默认不信任任何代理 |
+| `TRUSTED_PROXIES` | 空 | 可选的可信代理 IP/CIDR；留空时默认信任所有直接来源 |
 | `TZ` | `Asia/Shanghai` | 页面时间显示时区 |
 
 使用反向代理时，建议将 `BASE_URL` 设置为外部地址，例如：
@@ -64,20 +64,19 @@ http://服务器地址:8080/ss
 environment:
   BASE_URL: https://sub.example.com
   COOKIE_SECURE: "true"
-  TRUSTED_PROXIES: 172.17.0.1/32
 ```
 
-`TRUSTED_PROXIES` 支持单个 IPv4、IPv6 和 CIDR，例如：
+无需设置 `TRUSTED_PROXIES` 即可读取 Caddy 传来的真实 IP。若要把信任范围收紧为指定代理，它支持单个 IPv4、IPv6 和 CIDR，例如：
 
 ```dotenv
 TRUSTED_PROXIES=172.17.0.1/32,10.0.0.0/8,2001:db8::1/128
 ```
 
-配置会在启动时校验；无效 IP/CIDR 会使程序明确报错退出。登录后台后，也可以在“系统设置 → 可信代理 IP / CIDR”中配置，支持逗号或换行分隔，保存后立即生效。页面配置保存在数据库中，并与环境变量合并；两处均为空时不信任任何代理。
+配置会在启动时校验；无效 IP/CIDR 会使程序明确报错退出。登录后台后，也可以在“系统设置 → 可信代理 IP / CIDR”中配置，支持逗号或换行分隔，保存后立即生效。环境变量和页面配置均为空时默认信任所有直接来源；页面填写范围后，只信任所填范围；显式环境变量会与页面配置合并。
 
-应用先检查 TCP `RemoteAddr`。只有直接连接方命中可信范围时，才会从右向左检查 `X-Forwarded-For`，跳过可信代理并取第一个不受信任的有效地址；没有 `X-Forwarded-For` 时才会接受单一、有效的 `X-Real-IP`。代理头缺失或畸形时回退到 `RemoteAddr`。
+应用先解析 TCP `RemoteAddr`。默认模式会接受所有直接连接方的代理头；配置了范围后，只有直接连接方命中可信范围才读取代理头。`X-Forwarded-For` 会从右向左检查，跳过显式配置的可信代理并取第一个不受信任的有效地址；没有 `X-Forwarded-For` 时才接受单一、有效的 `X-Real-IP`。代理头缺失或畸形时回退到 `RemoteAddr`。
 
-> **安全警告：** 启用可信代理后，不要让不可信公网客户端绕过 Caddy 直接访问应用端口。否则当其连接地址落入可信范围时，可能伪造 IP 请求头。不要信任全部私网，只配置真正连接到应用的代理 IP 或最小网段。
+> **安全警告：** 默认信任所有来源意味着任何能直连应用端口的客户端都可以伪造 IP 请求头。必须让 Caddy 覆盖 `X-Forwarded-For` 和 `X-Real-IP`，并避免应用端口被公网绕过 Caddy 直接访问。安全要求更高时，请在后台或环境变量中只填写真正的代理地址。
 
 ## Caddy HTTPS 示例
 
@@ -87,7 +86,7 @@ sub.example.com {
 }
 ```
 
-上述现有拓扑需要设置 `TRUSTED_PROXIES=172.17.0.1/32`，并通过防火墙确保宿主机 8081 不可被公网直接访问。
+上述现有拓扑无需设置 `TRUSTED_PROXIES`；仍应通过防火墙确保宿主机 8081 不可被公网直接访问。若希望收紧范围，可选配 `TRUSTED_PROXIES=172.17.0.1/32`。
 
 更推荐让 Caddy 和 SubManager 使用同一个自定义 Docker 网络，Caddy 直接访问 `sub-manager:8080`，SubManager 不配置 `ports` 公网映射。下面是可直接调整的 Compose 示例：
 
