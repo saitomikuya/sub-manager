@@ -6,7 +6,7 @@ on:
       version:
         description: Version tag without the v prefix
         required: true
-        default: 1.0.1
+        default: 1.1.1
 
 permissions:
   contents: read
@@ -213,3 +213,13 @@ jobs:
             echo "- Digest: \`$version_digest\`"
             echo "- Platforms: \`linux/amd64\`, \`linux/arm64\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Update Docker Hub description
+        uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN_RELEASE }}
+          repository: saitomikuya/sub-manager
+          short-description: 支持文本订阅、文件订阅、内容去重和独立下载统计的轻量自托管订阅服务
+          readme-filepath: ./README.md
+          enable-url-completion: true

@@ -16,10 +16,11 @@ ARG VCS_REF=unknown
 RUN apk add --no-cache ca-certificates tzdata \
     && addgroup -S -g 10001 app \
     && adduser -S -D -H -u 10001 -G app app \
-    && mkdir -p /data \
-    && chown app:app /data
+    && mkdir -p /data/files \
+    && chown -R app:app /data
 ENV ADDR=:8080 \
     DATA_DIR=/data \
+    FILES_DIR=/data/files \
     TZ=Asia/Shanghai
 LABEL org.opencontainers.image.title="SubManager" \
       org.opencontainers.image.version=$VERSION \

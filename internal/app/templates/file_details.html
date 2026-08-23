@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} · SubManager</title><link rel="stylesheet" href="/admin/static/style.css"><script defer src="/admin/static/admin.js"></script>
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/admin/"><span class="brand-mark small">SM</span><span>订阅管理</span></a><nav><a href="/admin/files">返回文件管理</a><a href="/admin/?type=file">文件订阅</a></nav></header>
+  <main class="container">
+    <div class="page-heading"><div><h1>{{.File.OriginalName}}</h1><p>{{formatBytes .File.Size}} · {{.File.ContentType}} · 上传于 {{formatTimeValue .File.CreatedAt}}</p></div><div class="action-group"><a class="button" href="/admin/files/{{.File.ID}}/download?view=1" target="_blank" rel="noopener">查看</a><a class="button" href="/admin/files/{{.File.ID}}/download">下载</a><a class="button primary" href="/admin/files/{{.File.ID}}/subscriptions/new">创建关联订阅</a></div></div>
+    {{if .Message}}<div class="alert alert-success">{{.Message}}</div>{{end}}
+    <section class="form-card file-info-card">
+      <div class="file-info-heading"><h2>文件信息</h2>{{if eq .File.AssociationCount 0}}<form method="post" action="/admin/files/{{.File.ID}}/delete" data-confirm="确定彻底删除该原始文件吗？该操作不可恢复。"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><button class="button small danger" type="submit">彻底删除文件</button></form>{{end}}</div>
+      <dl class="details-list file-details-list"><div><dt>MD5</dt><dd><code>{{.File.MD5}}</code></dd></div><div><dt>SHA-256</dt><dd><code>{{.File.SHA256}}</code></dd></div><div><dt>文件累计下载</dt><dd><strong>{{.File.DownloadCount}}</strong> 次</dd></div><div><dt>最后下载</dt><dd>{{formatTime .File.LastDownloadedAt}}{{if .File.LastDownloadedIP}}<small>{{.File.LastDownloadedIP}}</small>{{end}}</dd></div></dl>
+    </section>
+    <div class="table-card association-table">
+      <div class="association-heading"><div class="association-title"><h2>当前关联订阅</h2><span class="association-count">{{.File.AssociationCount}}</span></div><p>“该文件下载”仅统计此文件通过对应订阅产生的下载。</p></div>
+      <div class="table-scroll"><table><thead><tr><th>订阅</th><th>状态</th><th>该文件下载</th><th>最后下载</th><th>订阅累计拉取</th><th>操作</th></tr></thead><tbody>
+      {{range .FileAssociations}}<tr><td><strong>{{.Subscription.Name}}</strong><div class="subscription-url"><code>{{$.BaseURL}}{{.Subscription.Path}}</code><button type="button" class="icon-button" data-copy="{{$.BaseURL}}{{.Subscription.Path}}">复制</button></div></td><td>{{if .Subscription.Enabled}}<span class="badge success">已启用</span>{{else}}<span class="badge muted-badge">已停用</span>{{end}}</td><td><strong>{{.DownloadCount}}</strong> 次</td><td>{{formatTime .LastFetchedAt}}{{if .LastFetchedIP}}<div><small>{{.LastFetchedIP}}</small></div>{{end}}</td><td>{{.Subscription.FetchCount}} 次</td><td><a class="button small" href="/admin/subscriptions/{{.Subscription.ID}}">编辑</a></td></tr>
+      {{else}}<tr><td colspan="6" class="empty-row">当前没有关联订阅，可通过“创建关联订阅”直接复用此文件。</td></tr>{{end}}
+    </tbody></table></div></div>
+  </main><div class="toast" data-toast hidden></div>
+</body>
+</html>

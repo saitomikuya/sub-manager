@@ -3,9 +3,13 @@ package app
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -15,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestApp(t *testing.T) *App {
@@ -490,6 +495,283 @@ func TestSubscriptionQRPayload(t *testing.T) {
 	if got != want {
 		t.Fatalf("QR payload = %q, want %q", got, want)
 	}
+}
+
+func TestFileSubscriptionsDeduplicateAndKeepIndependentStatistics(t *testing.T) {
+	application := newTestApp(t)
+	server := httptest.NewServer(application.Handler())
+	t.Cleanup(server.Close)
+	client, csrf := authenticatedClient(t, server.URL)
+	fileContent := []byte("proxies:\n  - name: shared\n")
+
+	for _, item := range []struct{ name, path string }{{"文件一", "/file-a"}, {"文件二", "/file-b"}} {
+		response := postMultipart(t, client, server.URL+"/admin/subscriptions", map[string]string{
+			"csrf_token": csrf, "type": SubscriptionTypeFile, "name": item.name, "path": item.path, "enabled": "1",
+		}, "file", "配置.yaml", fileContent)
+		assertStatus(t, response, http.StatusSeeOther)
+		response.Body.Close()
+	}
+
+	files, err := application.store.ListFiles(context.Background())
+	if err != nil || len(files) != 1 {
+		t.Fatalf("deduplicated files = %d, error = %v", len(files), err)
+	}
+	if files[0].AssociationCount != 2 {
+		t.Fatalf("association count = %d", files[0].AssociationCount)
+	}
+	if files[0].MD5 == "" || files[0].SHA256 == "" {
+		t.Fatalf("missing digests: %+v", files[0])
+	}
+	response := get(t, client, server.URL+"/admin/files")
+	assertStatus(t, response, http.StatusOK)
+	pageBody, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if !strings.Contains(string(pageBody), "创建关联订阅") || !strings.Contains(string(pageBody), files[0].MD5) {
+		t.Fatalf("file manager page is incomplete: %s", pageBody)
+	}
+	response = get(t, client, fmt.Sprintf("%s/admin/files/%d", server.URL, files[0].ID))
+	assertStatus(t, response, http.StatusOK)
+	detailBody, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if !strings.Contains(string(detailBody), "/file-a") || !strings.Contains(string(detailBody), "/file-b") {
+		t.Fatalf("file detail associations are incomplete: %s", detailBody)
+	}
+
+	for _, path := range []string{"/file-a", "/file-b"} {
+		response = get(t, client, server.URL+path)
+		assertStatus(t, response, http.StatusOK)
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		if !bytes.Equal(body, fileContent) {
+			t.Fatalf("%s body = %q", path, body)
+		}
+		if disposition := response.Header.Get("Content-Disposition"); !strings.Contains(disposition, "attachment") {
+			t.Fatalf("%s content disposition = %q", path, disposition)
+		}
+	}
+
+	subscriptions, err := application.store.ListSubscriptionsByType(context.Background(), SubscriptionTypeFile)
+	if err != nil || len(subscriptions) != 2 {
+		t.Fatalf("file subscriptions = %d, error = %v", len(subscriptions), err)
+	}
+	for _, sub := range subscriptions {
+		if sub.FetchCount != 1 || sub.FileID != files[0].ID {
+			t.Fatalf("unexpected subscription statistics: %+v", sub)
+		}
+	}
+	file, err := application.store.FileByID(context.Background(), files[0].ID)
+	if err != nil || file.DownloadCount != 2 {
+		t.Fatalf("file download count = %d, error = %v", file.DownloadCount, err)
+	}
+	response = get(t, client, fmt.Sprintf("%s/admin/files/%d/download", server.URL, file.ID))
+	assertStatus(t, response, http.StatusOK)
+	response.Body.Close()
+	headRequest, _ := http.NewRequest(http.MethodHead, server.URL+"/file-a", nil)
+	response, err = client.Do(headRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStatus(t, response, http.StatusOK)
+	response.Body.Close()
+	fileAfterNonCountedRequests, _ := application.store.FileByID(context.Background(), file.ID)
+	if fileAfterNonCountedRequests.DownloadCount != 2 {
+		t.Fatalf("admin download or HEAD changed count to %d", fileAfterNonCountedRequests.DownloadCount)
+	}
+	associations, err := application.store.FileAssociations(context.Background(), file.ID)
+	if err != nil || len(associations) != 2 {
+		t.Fatalf("file associations = %d, error = %v", len(associations), err)
+	}
+	for _, association := range associations {
+		if association.DownloadCount != 1 {
+			t.Fatalf("association download count = %d", association.DownloadCount)
+		}
+	}
+
+	response = get(t, client, server.URL+"/admin/subscriptions/"+strconv.FormatInt(subscriptions[0].ID, 10)+"/qrcode")
+	assertStatus(t, response, http.StatusNotFound)
+	response.Body.Close()
+}
+
+func TestCreateFileSubscriptionFromFileManagerAndDetach(t *testing.T) {
+	application := newTestApp(t)
+	server := httptest.NewServer(application.Handler())
+	t.Cleanup(server.Close)
+	client, csrf := authenticatedClient(t, server.URL)
+
+	response := postMultipart(t, client, server.URL+"/admin/subscriptions", map[string]string{
+		"csrf_token": csrf, "type": SubscriptionTypeFile, "name": "源订阅", "path": "/source", "enabled": "1",
+	}, "file", "source.txt", []byte("shared-file"))
+	assertStatus(t, response, http.StatusSeeOther)
+	response.Body.Close()
+	files, _ := application.store.ListFiles(context.Background())
+	if len(files) != 1 {
+		t.Fatalf("files = %d", len(files))
+	}
+
+	response = postForm(t, client, fmt.Sprintf("%s/admin/files/%d/subscriptions", server.URL, files[0].ID), url.Values{
+		"csrf_token": {csrf}, "type": {SubscriptionTypeFile}, "name": {"复用订阅"}, "path": {"/reused"}, "enabled": {"1"},
+	})
+	assertStatus(t, response, http.StatusSeeOther)
+	response.Body.Close()
+	files, _ = application.store.ListFiles(context.Background())
+	if files[0].AssociationCount != 2 {
+		t.Fatalf("association count after reuse = %d", files[0].AssociationCount)
+	}
+
+	subs, _ := application.store.ListSubscriptionsByType(context.Background(), SubscriptionTypeFile)
+	var reused Subscription
+	for _, sub := range subs {
+		if sub.Path == "/reused" {
+			reused = sub
+		}
+	}
+	response = postForm(t, client, fmt.Sprintf("%s/admin/subscriptions/%d/file/delete", server.URL, reused.ID), url.Values{"csrf_token": {csrf}})
+	assertStatus(t, response, http.StatusSeeOther)
+	response.Body.Close()
+	reused, err := application.store.SubscriptionByID(context.Background(), reused.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reused.FileID != 0 || reused.Enabled {
+		t.Fatalf("detached subscription = %+v", reused)
+	}
+	files, _ = application.store.ListFiles(context.Background())
+	if len(files) != 1 || files[0].AssociationCount != 1 {
+		t.Fatalf("file was not retained after detach: %+v", files)
+	}
+}
+
+func TestReplaceFilePreservesSubscriptionCountAndSeparatesFileCount(t *testing.T) {
+	application := newTestApp(t)
+	server := httptest.NewServer(application.Handler())
+	t.Cleanup(server.Close)
+	client, csrf := authenticatedClient(t, server.URL)
+
+	response := postMultipart(t, client, server.URL+"/admin/subscriptions", map[string]string{
+		"csrf_token": csrf, "type": SubscriptionTypeFile, "name": "替换测试", "path": "/replace", "enabled": "1",
+	}, "file", "old.txt", []byte("old-content"))
+	assertStatus(t, response, http.StatusSeeOther)
+	response.Body.Close()
+	response = get(t, client, server.URL+"/replace")
+	response.Body.Close()
+	subs, _ := application.store.ListSubscriptionsByType(context.Background(), SubscriptionTypeFile)
+	if len(subs) != 1 {
+		t.Fatalf("subscriptions = %d", len(subs))
+	}
+	oldFileID := subs[0].FileID
+
+	response = postMultipart(t, client, fmt.Sprintf("%s/admin/subscriptions/%d/file", server.URL, subs[0].ID), map[string]string{
+		"csrf_token": csrf,
+	}, "file", "new.txt", []byte("new-content"))
+	assertStatus(t, response, http.StatusSeeOther)
+	response.Body.Close()
+	response = get(t, client, server.URL+"/replace")
+	assertStatus(t, response, http.StatusOK)
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if string(body) != "new-content" {
+		t.Fatalf("replacement response = %q", body)
+	}
+	sub, _ := application.store.SubscriptionByID(context.Background(), subs[0].ID)
+	if sub.FetchCount != 2 || sub.FileID == oldFileID {
+		t.Fatalf("subscription after replacement = %+v", sub)
+	}
+	oldFile, _ := application.store.FileByID(context.Background(), oldFileID)
+	newFile, _ := application.store.FileByID(context.Background(), sub.FileID)
+	if oldFile.DownloadCount != 1 || oldFile.AssociationCount != 0 || newFile.DownloadCount != 1 || newFile.AssociationCount != 1 {
+		t.Fatalf("file counts after replacement: old=%+v new=%+v", oldFile, newFile)
+	}
+
+	response = postForm(t, client, fmt.Sprintf("%s/admin/files/%d/delete", server.URL, newFile.ID), url.Values{"csrf_token": {csrf}})
+	assertStatus(t, response, http.StatusConflict)
+	response.Body.Close()
+	response = postForm(t, client, fmt.Sprintf("%s/admin/files/%d/delete", server.URL, oldFile.ID), url.Values{"csrf_token": {csrf}})
+	assertStatus(t, response, http.StatusSeeOther)
+	response.Body.Close()
+	if _, err := application.store.FileByID(context.Background(), oldFile.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("deleted file lookup error = %v", err)
+	}
+}
+
+func TestLegacySubscriptionsMigrateToTextType(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE subscriptions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL DEFAULT '', path TEXT NOT NULL UNIQUE,
+		content TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, fetch_count INTEGER NOT NULL DEFAULT 0,
+		last_fetched_at TEXT, last_fetched_ip TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nowValue := dbTime(time.Now())
+	if _, err := db.Exec(`INSERT INTO subscriptions(name, path, content, created_at, updated_at) VALUES ('legacy', '/legacy', 'ss://legacy', ?, ?)`, nowValue, nowValue); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenStore(databasePath, []byte("hash"), 90)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	sub, err := store.SubscriptionByPath(context.Background(), "/legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sub.Type != SubscriptionTypeText || sub.Content != "ss://legacy" {
+		t.Fatalf("migrated subscription = %+v", sub)
+	}
+}
+
+func authenticatedClient(t *testing.T, serverURL string) (*http.Client, string) {
+	t.Helper()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+	response := postForm(t, client, serverURL+"/admin/login", url.Values{"password": {"password"}})
+	response.Body.Close()
+	response = get(t, client, serverURL+"/admin/password")
+	csrf := extractCSRF(t, response)
+	response.Body.Close()
+	response = postForm(t, client, serverURL+"/admin/password", url.Values{
+		"csrf_token": {csrf}, "new_password": {"test-pass"}, "confirm_password": {"test-pass"},
+	})
+	response.Body.Close()
+	response = get(t, client, serverURL+"/admin/")
+	csrf = extractCSRF(t, response)
+	response.Body.Close()
+	return client, csrf
+}
+
+func postMultipart(t *testing.T, client *http.Client, endpoint string, fields map[string]string, fileField, filename string, content []byte) *http.Response {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for key, value := range fields {
+		if err := writer.WriteField(key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	part, err := writer.CreateFormFile(fileField, filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request, _ := http.NewRequest(http.MethodPost, endpoint, &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
 }
 
 func postForm(t *testing.T, client *http.Client, endpoint string, values url.Values) *http.Response {

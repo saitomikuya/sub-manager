@@ -35,6 +35,9 @@ type Subscription struct {
 	Name          string
 	Path          string
 	Content       string
+	Type          string
+	FileID        int64
+	DownloadName  string
 	Enabled       bool
 	FetchCount    int64
 	LastFetchedAt *time.Time
@@ -43,9 +46,38 @@ type Subscription struct {
 	UpdatedAt     time.Time
 }
 
+const (
+	SubscriptionTypeText = "text"
+	SubscriptionTypeFile = "file"
+)
+
+type StoredFile struct {
+	ID               int64
+	MD5              string
+	SHA256           string
+	Size             int64
+	ContentType      string
+	StorageKey       string
+	OriginalName     string
+	DownloadCount    int64
+	LastDownloadedAt *time.Time
+	LastDownloadedIP string
+	AssociationCount int64
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
+type FileAssociation struct {
+	Subscription  Subscription
+	DownloadCount int64
+	LastFetchedAt *time.Time
+	LastFetchedIP string
+}
+
 type AccessLog struct {
 	ID             int64
 	SubscriptionID int64
+	FileID         int64
 	RequestedAt    time.Time
 	ClientIP       string
 	ClientName     string
@@ -120,6 +152,21 @@ func (s *Store) migrate(defaultPasswordHash []byte, defaultRetention int) error 
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS files (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			md5 TEXT NOT NULL,
+			sha256 TEXT NOT NULL UNIQUE,
+			size_bytes INTEGER NOT NULL,
+			content_type TEXT NOT NULL,
+			storage_key TEXT NOT NULL UNIQUE,
+			original_name TEXT NOT NULL,
+			download_count INTEGER NOT NULL DEFAULT 0,
+			last_downloaded_at TEXT,
+			last_downloaded_ip TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_files_md5 ON files(md5)`,
 		`CREATE TABLE IF NOT EXISTS access_logs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
@@ -145,11 +192,71 @@ func (s *Store) migrate(defaultPasswordHash []byte, defaultRetention int) error 
 			return fmt.Errorf("database migration: %w", err)
 		}
 	}
+	for _, column := range []struct {
+		table, name, definition string
+	}{
+		{"subscriptions", "type", `TEXT NOT NULL DEFAULT 'text' CHECK(type IN ('text', 'file'))`},
+		{"subscriptions", "file_id", `INTEGER REFERENCES files(id) ON DELETE RESTRICT`},
+		{"subscriptions", "download_name", `TEXT NOT NULL DEFAULT ''`},
+		{"access_logs", "file_id", `INTEGER REFERENCES files(id) ON DELETE SET NULL`},
+	} {
+		if err := s.addColumnIfMissing(column.table, column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	for _, statement := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_subscriptions_type ON subscriptions(type, id DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_subscriptions_file ON subscriptions(file_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_access_logs_file_time ON access_logs(file_id, requested_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS file_subscription_stats (
+			file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+			subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+			download_count INTEGER NOT NULL DEFAULT 0,
+			last_downloaded_at TEXT,
+			last_downloaded_ip TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY(file_id, subscription_id)
+		)`,
+	} {
+		if _, err := s.db.Exec(statement); err != nil {
+			return fmt.Errorf("database migration: %w", err)
+		}
+	}
 	now := dbTime(time.Now())
 	_, err := s.db.Exec(`INSERT OR IGNORE INTO settings
 		(id, password_hash, must_change_password, session_version, log_retention_days, trusted_proxies, created_at, updated_at)
 		VALUES (1, ?, 1, 1, ?, '', ?, ?)`, defaultPasswordHash, defaultRetention, now, now)
 	return err
+}
+
+func (s *Store) addColumnIfMissing(table, name, definition string) error {
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return fmt.Errorf("database migration: inspect %s: %w", table, err)
+	}
+	found := false
+	for rows.Next() {
+		var cid int
+		var columnName, columnType string
+		var notNull, primaryKey int
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		if columnName == name {
+			found = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	if _, err := s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + name + ` ` + definition); err != nil {
+		return fmt.Errorf("database migration: add %s.%s: %w", table, name, err)
+	}
+	return nil
 }
 
 func (s *Store) Settings(ctx context.Context) (Settings, error) {
@@ -222,8 +329,19 @@ func (s *Store) PurgeExpiredSessions(ctx context.Context) error {
 }
 
 func (s *Store) ListSubscriptions(ctx context.Context) ([]Subscription, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, path, content, enabled, fetch_count,
-		last_fetched_at, last_fetched_ip, created_at, updated_at FROM subscriptions ORDER BY id DESC`)
+	return s.ListSubscriptionsByType(ctx, "")
+}
+
+func (s *Store) ListSubscriptionsByType(ctx context.Context, subscriptionType string) ([]Subscription, error) {
+	query := `SELECT id, name, path, content, type, COALESCE(file_id, 0), download_name, enabled, fetch_count,
+		last_fetched_at, last_fetched_ip, created_at, updated_at FROM subscriptions`
+	var args []any
+	if subscriptionType != "" {
+		query += ` WHERE type = ?`
+		args = append(args, subscriptionType)
+	}
+	query += ` ORDER BY id DESC`
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -246,7 +364,7 @@ func scanSubscription(row scanner) (Subscription, error) {
 	var enabled int
 	var lastFetched sql.NullString
 	var created, updated string
-	err := row.Scan(&sub.ID, &sub.Name, &sub.Path, &sub.Content, &enabled, &sub.FetchCount,
+	err := row.Scan(&sub.ID, &sub.Name, &sub.Path, &sub.Content, &sub.Type, &sub.FileID, &sub.DownloadName, &enabled, &sub.FetchCount,
 		&lastFetched, &sub.LastFetchedIP, &created, &updated)
 	if err != nil {
 		return sub, err
@@ -271,13 +389,13 @@ func scanSubscription(row scanner) (Subscription, error) {
 }
 
 func (s *Store) SubscriptionByID(ctx context.Context, id int64) (Subscription, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, name, path, content, enabled, fetch_count,
+	row := s.db.QueryRowContext(ctx, `SELECT id, name, path, content, type, COALESCE(file_id, 0), download_name, enabled, fetch_count,
 		last_fetched_at, last_fetched_ip, created_at, updated_at FROM subscriptions WHERE id = ?`, id)
 	return scanSubscription(row)
 }
 
 func (s *Store) SubscriptionByPath(ctx context.Context, path string) (Subscription, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, name, path, content, enabled, fetch_count,
+	row := s.db.QueryRowContext(ctx, `SELECT id, name, path, content, type, COALESCE(file_id, 0), download_name, enabled, fetch_count,
 		last_fetched_at, last_fetched_ip, created_at, updated_at FROM subscriptions WHERE path = ? AND enabled = 1`, path)
 	return scanSubscription(row)
 }
@@ -292,9 +410,48 @@ func (s *Store) CreateSubscription(ctx context.Context, name, path, content stri
 	return result.LastInsertId()
 }
 
+func (s *Store) CreateFileSubscription(ctx context.Context, name, path string, fileID int64, downloadName string, enabled bool) (int64, error) {
+	now := dbTime(time.Now())
+	result, err := s.db.ExecContext(ctx, `INSERT INTO subscriptions
+		(name, path, content, type, file_id, download_name, enabled, created_at, updated_at)
+		VALUES (?, ?, '', 'file', ?, ?, ?, ?, ?)`, name, path, fileID, downloadName, boolInt(enabled), now, now)
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
 func (s *Store) UpdateSubscription(ctx context.Context, id int64, name, path, content string, enabled bool) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE subscriptions SET name = ?, path = ?, content = ?, enabled = ?, updated_at = ? WHERE id = ?`,
+	result, err := s.db.ExecContext(ctx, `UPDATE subscriptions SET name = ?, path = ?, content = ?, enabled = ?, updated_at = ? WHERE id = ? AND type = 'text'`,
 		name, path, content, boolInt(enabled), dbTime(time.Now()), id)
+	if err != nil {
+		return err
+	}
+	return expectOne(result)
+}
+
+func (s *Store) UpdateFileSubscription(ctx context.Context, id int64, name, path string, enabled bool) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE subscriptions SET name = ?, path = ?, enabled = ?, updated_at = ?
+		WHERE id = ? AND type = 'file' AND (file_id IS NOT NULL OR ? = 0)`,
+		name, path, boolInt(enabled), dbTime(time.Now()), id, boolInt(enabled))
+	if err != nil {
+		return err
+	}
+	return expectOne(result)
+}
+
+func (s *Store) ReplaceSubscriptionFile(ctx context.Context, id, fileID int64, downloadName string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE subscriptions SET file_id = ?, download_name = ?, updated_at = ?
+		WHERE id = ? AND type = 'file'`, fileID, downloadName, dbTime(time.Now()), id)
+	if err != nil {
+		return err
+	}
+	return expectOne(result)
+}
+
+func (s *Store) DetachSubscriptionFile(ctx context.Context, id int64) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE subscriptions SET file_id = NULL, download_name = '', enabled = 0, updated_at = ?
+		WHERE id = ? AND type = 'file'`, dbTime(time.Now()), id)
 	if err != nil {
 		return err
 	}
@@ -339,13 +496,13 @@ func (s *Store) BatchUpdateContent(ctx context.Context, ids []int64, content str
 		countArgs[i] = id
 	}
 	var existing int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM subscriptions WHERE id IN (`+strings.Join(placeholders, ",")+`)`, countArgs...).Scan(&existing); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM subscriptions WHERE type = 'text' AND id IN (`+strings.Join(placeholders, ",")+`)`, countArgs...).Scan(&existing); err != nil {
 		return 0, err
 	}
 	if existing != len(ids) {
 		return 0, sql.ErrNoRows
 	}
-	query := `UPDATE subscriptions SET content = ?, updated_at = ? WHERE id IN (` + strings.Join(placeholders, ",") + `)`
+	query := `UPDATE subscriptions SET content = ?, updated_at = ? WHERE type = 'text' AND id IN (` + strings.Join(placeholders, ",") + `)`
 	result, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return 0, err
@@ -363,7 +520,7 @@ func (s *Store) BatchUpdateContent(ctx context.Context, ids []int64, content str
 	return updated, nil
 }
 
-func (s *Store) RecordAccess(ctx context.Context, subscriptionID int64, ip, client, userAgent, method string, status int) error {
+func (s *Store) RecordAccess(ctx context.Context, subscriptionID, fileID int64, ip, client, userAgent, method string, status int) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -378,9 +535,32 @@ func (s *Store) RecordAccess(ctx context.Context, subscriptionID int64, ip, clie
 	if err := expectOne(result); err != nil {
 		return err
 	}
+	if fileID > 0 {
+		result, err = tx.ExecContext(ctx, `UPDATE files SET download_count = download_count + 1,
+			last_downloaded_at = ?, last_downloaded_ip = ?, updated_at = ? WHERE id = ?`, now, ip, now, fileID)
+		if err != nil {
+			return err
+		}
+		if err := expectOne(result); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO file_subscription_stats
+			(file_id, subscription_id, download_count, last_downloaded_at, last_downloaded_ip)
+			VALUES (?, ?, 1, ?, ?)
+			ON CONFLICT(file_id, subscription_id) DO UPDATE SET
+				download_count = download_count + 1,
+				last_downloaded_at = excluded.last_downloaded_at,
+				last_downloaded_ip = excluded.last_downloaded_ip`, fileID, subscriptionID, now, ip); err != nil {
+			return err
+		}
+	}
+	var nullableFileID any
+	if fileID > 0 {
+		nullableFileID = fileID
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO access_logs
-		(subscription_id, requested_at, client_ip, client_name, user_agent, method, status_code)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`, subscriptionID, now, ip, client, userAgent, method, status); err != nil {
+		(subscription_id, file_id, requested_at, client_ip, client_name, user_agent, method, status_code)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, subscriptionID, nullableFileID, now, ip, client, userAgent, method, status); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -409,7 +589,7 @@ func (s *Store) AccessLogs(ctx context.Context, subscriptionID int64, page, page
 		return LogPage{}, err
 	}
 	queryArgs := append(append([]any{}, args...), pageSize, (page-1)*pageSize)
-	rows, err := s.db.QueryContext(ctx, `SELECT id, subscription_id, requested_at, client_ip,
+	rows, err := s.db.QueryContext(ctx, `SELECT id, subscription_id, COALESCE(file_id, 0), requested_at, client_ip,
 		client_name, user_agent, method, status_code FROM access_logs WHERE `+clause+`
 		ORDER BY requested_at DESC, id DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
@@ -423,7 +603,7 @@ func (s *Store) AccessLogs(ctx context.Context, subscriptionID int64, page, page
 	for rows.Next() {
 		var log AccessLog
 		var requested string
-		if err := rows.Scan(&log.ID, &log.SubscriptionID, &requested, &log.ClientIP, &log.ClientName,
+		if err := rows.Scan(&log.ID, &log.SubscriptionID, &log.FileID, &requested, &log.ClientIP, &log.ClientName,
 			&log.UserAgent, &log.Method, &log.StatusCode); err != nil {
 			return LogPage{}, err
 		}
@@ -434,6 +614,152 @@ func (s *Store) AccessLogs(ctx context.Context, subscriptionID int64, page, page
 		out.Logs = append(out.Logs, log)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) FileByID(ctx context.Context, id int64) (StoredFile, error) {
+	return scanStoredFile(s.db.QueryRowContext(ctx, `SELECT f.id, f.md5, f.sha256, f.size_bytes, f.content_type,
+		f.storage_key, f.original_name, f.download_count, f.last_downloaded_at, f.last_downloaded_ip,
+		(SELECT COUNT(*) FROM subscriptions s WHERE s.file_id = f.id), f.created_at, f.updated_at
+		FROM files f WHERE f.id = ?`, id))
+}
+
+func (s *Store) FileByDigests(ctx context.Context, md5Digest, sha256Digest string) (StoredFile, error) {
+	return scanStoredFile(s.db.QueryRowContext(ctx, `SELECT f.id, f.md5, f.sha256, f.size_bytes, f.content_type,
+		f.storage_key, f.original_name, f.download_count, f.last_downloaded_at, f.last_downloaded_ip,
+		(SELECT COUNT(*) FROM subscriptions s WHERE s.file_id = f.id), f.created_at, f.updated_at
+		FROM files f WHERE f.md5 = ? AND f.sha256 = ?`, md5Digest, sha256Digest))
+}
+
+func (s *Store) FileBySHA256(ctx context.Context, sha256Digest string) (StoredFile, error) {
+	return scanStoredFile(s.db.QueryRowContext(ctx, `SELECT f.id, f.md5, f.sha256, f.size_bytes, f.content_type,
+		f.storage_key, f.original_name, f.download_count, f.last_downloaded_at, f.last_downloaded_ip,
+		(SELECT COUNT(*) FROM subscriptions s WHERE s.file_id = f.id), f.created_at, f.updated_at
+		FROM files f WHERE f.sha256 = ?`, sha256Digest))
+}
+
+func scanStoredFile(row scanner) (StoredFile, error) {
+	var file StoredFile
+	var lastDownloaded sql.NullString
+	var created, updated string
+	err := row.Scan(&file.ID, &file.MD5, &file.SHA256, &file.Size, &file.ContentType, &file.StorageKey,
+		&file.OriginalName, &file.DownloadCount, &lastDownloaded, &file.LastDownloadedIP,
+		&file.AssociationCount, &created, &updated)
+	if err != nil {
+		return file, err
+	}
+	file.CreatedAt, err = parseDBTime(created)
+	if err != nil {
+		return file, err
+	}
+	file.UpdatedAt, err = parseDBTime(updated)
+	if err != nil {
+		return file, err
+	}
+	if lastDownloaded.Valid {
+		t, parseErr := parseDBTime(lastDownloaded.String)
+		if parseErr != nil {
+			return file, parseErr
+		}
+		file.LastDownloadedAt = &t
+	}
+	return file, nil
+}
+
+func (s *Store) CreateFile(ctx context.Context, md5Digest, sha256Digest string, size int64, contentType, storageKey, originalName string) (StoredFile, error) {
+	now := dbTime(time.Now())
+	result, err := s.db.ExecContext(ctx, `INSERT INTO files
+		(md5, sha256, size_bytes, content_type, storage_key, original_name, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, md5Digest, sha256Digest, size, contentType, storageKey, originalName, now, now)
+	if err != nil {
+		return StoredFile{}, err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return StoredFile{}, err
+	}
+	return s.FileByID(ctx, id)
+}
+
+func (s *Store) ListFiles(ctx context.Context) ([]StoredFile, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT f.id, f.md5, f.sha256, f.size_bytes, f.content_type,
+		f.storage_key, f.original_name, f.download_count, f.last_downloaded_at, f.last_downloaded_ip,
+		(SELECT COUNT(*) FROM subscriptions s WHERE s.file_id = f.id), f.created_at, f.updated_at
+		FROM files f ORDER BY f.id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []StoredFile
+	for rows.Next() {
+		file, err := scanStoredFile(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, file)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) FileAssociations(ctx context.Context, fileID int64) ([]FileAssociation, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT s.id, s.name, s.path, s.content, s.type, COALESCE(s.file_id, 0),
+		s.download_name, s.enabled, s.fetch_count, s.last_fetched_at, s.last_fetched_ip, s.created_at, s.updated_at,
+		COALESCE(fs.download_count, 0), fs.last_downloaded_at, COALESCE(fs.last_downloaded_ip, '')
+		FROM subscriptions s
+		LEFT JOIN file_subscription_stats fs ON fs.subscription_id = s.id AND fs.file_id = ?
+		WHERE s.file_id = ? ORDER BY s.id DESC`, fileID, fileID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []FileAssociation
+	for rows.Next() {
+		var association FileAssociation
+		var enabled int
+		var subLast, pairLast sql.NullString
+		var created, updated string
+		err := rows.Scan(&association.Subscription.ID, &association.Subscription.Name, &association.Subscription.Path,
+			&association.Subscription.Content, &association.Subscription.Type, &association.Subscription.FileID,
+			&association.Subscription.DownloadName, &enabled, &association.Subscription.FetchCount, &subLast,
+			&association.Subscription.LastFetchedIP, &created, &updated, &association.DownloadCount, &pairLast,
+			&association.LastFetchedIP)
+		if err != nil {
+			return nil, err
+		}
+		association.Subscription.Enabled = enabled != 0
+		association.Subscription.CreatedAt, err = parseDBTime(created)
+		if err != nil {
+			return nil, err
+		}
+		association.Subscription.UpdatedAt, err = parseDBTime(updated)
+		if err != nil {
+			return nil, err
+		}
+		if subLast.Valid {
+			t, parseErr := parseDBTime(subLast.String)
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			association.Subscription.LastFetchedAt = &t
+		}
+		if pairLast.Valid {
+			t, parseErr := parseDBTime(pairLast.String)
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			association.LastFetchedAt = &t
+		}
+		out = append(out, association)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteFile(ctx context.Context, id int64) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM files WHERE id = ?
+		AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE file_id = files.id)`, id)
+	if err != nil {
+		return err
+	}
+	return expectOne(result)
 }
 
 func (s *Store) ClearAccessLogs(ctx context.Context, subscriptionID int64) error {

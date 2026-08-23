@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} · SubManager</title><link rel="stylesheet" href="/admin/static/style.css"><script defer src="/admin/static/admin.js"></script>
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/admin/"><span class="brand-mark small">SM</span><span>订阅管理</span></a><nav><a href="/admin/">订阅管理</a><a href="/admin/settings">系统设置</a></nav></header>
+  <main class="container">
+    <div class="page-heading"><div><h1>文件管理</h1><p>按文件内容统一管理原始文件、汇总下载次数及其关联订阅。</p></div><a class="button primary" href="/admin/subscriptions/new?type=file">＋ 上传并创建订阅</a></div>
+    <div class="tabs"><a class="tab" href="/admin/">文本订阅</a><a class="tab" href="/admin/?type=file">文件订阅</a><a class="tab active" href="/admin/files">文件管理</a></div>
+    {{if .Message}}<div class="alert alert-success">{{.Message}}</div>{{end}}
+    {{if .Files}}
+    <div class="table-card"><div class="table-scroll"><table>
+      <thead><tr><th>原始文件</th><th>大小</th><th>MD5</th><th>关联订阅</th><th>文件累计下载</th><th>最后下载</th><th class="actions-col">操作</th></tr></thead>
+      <tbody>{{range .Files}}<tr>
+        <td><strong>{{.OriginalName}}</strong><div><small>{{.ContentType}}</small></div></td><td class="nowrap">{{formatBytes .Size}}</td><td><code class="digest">{{.MD5}}</code></td>
+        <td><strong>{{.AssociationCount}}</strong> 条</td><td><strong>{{.DownloadCount}}</strong> 次</td><td><div>{{formatTime .LastDownloadedAt}}</div>{{if .LastDownloadedIP}}<small>{{.LastDownloadedIP}}</small>{{end}}</td>
+        <td><div class="action-group"><a class="button small" href="/admin/files/{{.ID}}">详情</a><a class="button small" href="/admin/files/{{.ID}}/download?view=1" target="_blank" rel="noopener">查看</a><a class="button small" href="/admin/files/{{.ID}}/download">下载</a><a class="button small primary" href="/admin/files/{{.ID}}/subscriptions/new">创建关联订阅</a>{{if eq .AssociationCount 0}}<form method="post" action="/admin/files/{{.ID}}/delete" class="inline-form" data-confirm="确定彻底删除文件“{{.OriginalName}}”吗？该操作不可恢复。"><input type="hidden" name="csrf_token" value="{{$.CSRF}}"><button class="button small danger" type="submit">删除</button></form>{{end}}</div></td>
+      </tr>{{end}}</tbody>
+    </table></div></div>
+    {{else}}<div class="empty-state"><div class="empty-icon">⇩</div><h2>还没有上传文件</h2><p>新建文件订阅时上传的原始文件会自动出现在这里。</p><a class="button primary" href="/admin/subscriptions/new?type=file">上传并创建订阅</a></div>{{end}}
+  </main>
+</body>
+</html>

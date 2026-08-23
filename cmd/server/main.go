@@ -26,6 +26,10 @@ func main() {
 		logger.Error("create data directory", "error", err)
 		os.Exit(1)
 	}
+	if err := os.MkdirAll(cfg.FilesDir, 0o750); err != nil {
+		logger.Error("create files directory", "error", err)
+		os.Exit(1)
+	}
 
 	application, err := app.New(cfg, logger)
 	if err != nil {
@@ -38,8 +42,8 @@ func main() {
 		Addr:              cfg.Addr,
 		Handler:           application.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
+		ReadTimeout:       5 * time.Minute,
+		WriteTimeout:      5 * time.Minute,
 		IdleTimeout:       2 * time.Minute,
 	}
 

@@ -8,26 +8,57 @@
   <script defer src="/admin/static/admin.js"></script>
 </head>
 <body>
-  <header class="topbar"><a class="brand" href="/admin/"><span class="brand-mark small">SM</span><span>订阅管理</span></a><nav><a href="/admin/">返回列表</a></nav></header>
+  <header class="topbar"><a class="brand" href="/admin/"><span class="brand-mark small">SM</span><span>订阅管理</span></a><nav><a href="/admin/?type={{.SubscriptionType}}">返回列表</a>{{if eq .SubscriptionType "file"}}<a href="/admin/files">文件管理</a>{{end}}</nav></header>
   <main class="container narrow">
-    <div class="page-heading"><div><h1>{{.Title}}</h1><p>节点原始内容会在访问订阅路径时动态进行标准 Base64 编码。</p></div></div>
+    <div class="page-heading"><div><h1>{{.Title}}</h1><p>{{if eq .SubscriptionType "file"}}公开访问路径会直接下载当前关联的原始文件。{{else}}节点原始内容会在访问订阅路径时动态进行标准 Base64 编码。{{end}}</p></div></div>
+    {{if .Message}}<div class="alert alert-success">{{.Message}}</div>{{end}}
     {{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}
-    <form method="post" action="{{if .IsNew}}/admin/subscriptions{{else}}/admin/subscriptions/{{.Subscription.ID}}{{end}}" class="form-card stack">
+    <form method="post" action="{{if and .IsNew .File.ID}}/admin/files/{{.File.ID}}/subscriptions{{else if .IsNew}}/admin/subscriptions{{else}}/admin/subscriptions/{{.Subscription.ID}}{{end}}" class="form-card stack" {{if and .IsNew (eq .SubscriptionType "file") (not .File.ID)}}enctype="multipart/form-data"{{end}}>
       <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <input type="hidden" name="type" value="{{.SubscriptionType}}">
       <label><span>订阅名称 <small>选填</small></span><input type="text" name="name" maxlength="100" value="{{.Subscription.Name}}" placeholder="例如：Oracle 节点"></label>
       <label>
         <span>访问路径</span>
         <div class="input-action"><input type="text" name="path" value="{{.Subscription.Path}}" required pattern="/[A-Za-z0-9_-]{1,64}" data-path-input><button type="button" class="button" data-generate-path>重新生成</button></div>
         <small>以 / 开头，仅支持字母、数字、短横线和下划线。修改后旧路径立即失效。</small>
       </label>
+      {{if eq .SubscriptionType "text"}}
       <label><span>节点内容</span><textarea name="content" rows="18" required maxlength="2097152" spellcheck="false" placeholder="每行一个节点链接">{{.Subscription.Content}}</textarea><small>最多 2 MiB，保存时会统一换行格式。</small></label>
+      {{else if .IsNew}}
+        {{if .File.ID}}
+        <div class="selected-file"><div><strong>{{.File.OriginalName}}</strong><small>{{formatBytes .File.Size}} · MD5 <code>{{.File.MD5}}</code></small></div><span class="badge success">从文件管理关联</span></div>
+        {{else}}
+        <label><span>上传文件</span><input type="file" name="file" required><small>不能为空，最大 {{.MaxUploadMiB}} MiB；相同文件会自动去重。</small></label>
+        {{end}}
+      {{end}}
       <label class="checkbox-label"><input type="checkbox" name="enabled" value="1" {{if .Subscription.Enabled}}checked{{end}}> 启用此订阅</label>
       <div class="form-actions">
-        <a class="button" href="/admin/">取消</a>
-        {{if not .IsNew}}<a class="button" href="/admin/subscriptions/{{.Subscription.ID}}/preview" target="_blank" rel="noopener">预览 Base64</a>{{end}}
+        <a class="button" href="{{if eq .SubscriptionType "file"}}/admin/?type=file{{else}}/admin/{{end}}">取消</a>
+        {{if and (not .IsNew) (eq .SubscriptionType "text")}}<a class="button" href="/admin/subscriptions/{{.Subscription.ID}}/preview" target="_blank" rel="noopener">预览 Base64</a>{{end}}
         <button type="submit" class="button primary">保存订阅</button>
       </div>
     </form>
+
+    {{if and (not .IsNew) (eq .SubscriptionType "file")}}
+    <section class="form-card stack file-management-card">
+      <div><h2>文件管理</h2><p>替换或删除关联只影响此订阅；原始文件仍由文件管理统一维护。</p></div>
+      {{if .File.ID}}
+      <div class="file-summary">
+        <div><strong>{{.Subscription.DownloadName}}</strong><small>{{formatBytes .File.Size}} · {{.File.ContentType}}</small></div>
+        <dl><div><dt>MD5</dt><dd><code>{{.File.MD5}}</code></dd></div><div><dt>文件累计下载</dt><dd>{{.File.DownloadCount}} 次</dd></div></dl>
+      </div>
+      <div class="action-group"><a class="button" href="/admin/subscriptions/{{.Subscription.ID}}/file/download?view=1" target="_blank" rel="noopener">查看</a><a class="button" href="/admin/subscriptions/{{.Subscription.ID}}/file/download">下载</a><a class="button" href="/admin/files/{{.File.ID}}">文件详情</a></div>
+      {{else}}<div class="alert alert-info">当前没有关联文件，订阅已停用。上传文件后可重新启用。</div>{{end}}
+      <form method="post" action="/admin/subscriptions/{{.Subscription.ID}}/file" enctype="multipart/form-data" class="stack compact-form">
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+        <label><span>{{if .File.ID}}替换文件{{else}}上传文件{{end}}</span><input type="file" name="file" required><small>最大 {{.MaxUploadMiB}} MiB，相同内容自动复用已有文件。</small></label>
+        <div class="form-actions"><button type="submit" class="button primary">{{if .File.ID}}确认替换{{else}}上传并关联{{end}}</button></div>
+      </form>
+      {{if .File.ID}}<form method="post" action="/admin/subscriptions/{{.Subscription.ID}}/file/delete" data-confirm="确定删除当前关联吗？订阅会自动停用，原始文件仍保留在文件管理中。">
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}"><button type="submit" class="button danger">删除当前文件关联</button>
+      </form>{{end}}
+    </section>
+    {{end}}
   </main>
 </body>
 </html>

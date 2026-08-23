@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,13 +22,15 @@ import (
 var webFiles embed.FS
 
 type App struct {
-	cfg        Config
-	store      *Store
-	logger     *slog.Logger
-	templates  *template.Template
-	limiter    *loginLimiter
-	ipResolver *clientIPResolver
-	cancel     context.CancelFunc
+	cfg         Config
+	store       *Store
+	fileStorage *FileStorage
+	logger      *slog.Logger
+	templates   *template.Template
+	limiter     *loginLimiter
+	ipResolver  *clientIPResolver
+	cancel      context.CancelFunc
+	fileMu      sync.Mutex
 }
 
 type viewData struct {
@@ -38,6 +41,10 @@ type viewData struct {
 	MustChange        bool
 	Subscriptions     []Subscription
 	Subscription      Subscription
+	SubscriptionType  string
+	Files             []StoredFile
+	File              StoredFile
+	FileAssociations  []FileAssociation
 	IsNew             bool
 	BaseURL           string
 	Logs              LogPage
@@ -48,6 +55,7 @@ type viewData struct {
 	Settings          Settings
 	EnvTrustedProxies string
 	TrustAllByDefault bool
+	MaxUploadMiB      int64
 }
 
 type authContext struct {
@@ -61,6 +69,12 @@ type contextKey string
 const authContextKey contextKey = "admin-auth"
 
 func New(cfg Config, logger *slog.Logger) (*App, error) {
+	if cfg.FilesDir == "" {
+		cfg.FilesDir = filepath.Join(filepath.Dir(cfg.DatabasePath), "files")
+	}
+	if cfg.MaxUploadBytes <= 0 {
+		cfg.MaxUploadBytes = defaultMaxUploadBytes
+	}
 	defaultHash, err := bcrypt.GenerateFromPassword([]byte("password"), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, err
@@ -68,6 +82,11 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 	store, err := OpenStore(cfg.DatabasePath, defaultHash, cfg.DefaultRetain)
 	if err != nil {
 		return nil, err
+	}
+	fileStorage, err := NewFileStorage(cfg.FilesDir)
+	if err != nil {
+		store.Close()
+		return nil, fmt.Errorf("initialize file storage: %w", err)
 	}
 	ipResolver, err := newClientIPResolver(cfg.TrustedProxies, cfg.TrustAllByDefault)
 	if err != nil {
@@ -91,6 +110,7 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 			return t.Local().Format("2006-01-02 15:04:05")
 		},
 		"formatTimeValue": func(t time.Time) string { return t.Local().Format("2006-01-02 15:04:05") },
+		"formatBytes":     formatBytes,
 		"add":             func(a, b int) int { return a + b },
 		"sub":             func(a, b int) int { return a - b },
 	}
@@ -101,11 +121,27 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &App{
-		cfg: cfg, store: store, logger: logger, templates: templates,
+		cfg: cfg, store: store, fileStorage: fileStorage, logger: logger, templates: templates,
 		limiter: newLoginLimiter(), ipResolver: ipResolver, cancel: cancel,
 	}
 	go a.cleanupLoop(ctx)
 	return a, nil
+}
+
+func formatBytes(size int64) string {
+	const unit = int64(1024)
+	if size < unit {
+		return fmt.Sprintf("%d B", size)
+	}
+	labels := []string{"KiB", "MiB", "GiB", "TiB"}
+	value := float64(size)
+	for _, label := range labels {
+		value /= 1024
+		if value < 1024 || label == labels[len(labels)-1] {
+			return fmt.Sprintf("%.1f %s", value, label)
+		}
+	}
+	return fmt.Sprintf("%d B", size)
 }
 
 func (a *App) Close() error {
@@ -138,6 +174,15 @@ func (a *App) Handler() http.Handler {
 	mux.Handle("GET /admin/subscriptions/{id}/qrcode", a.requireAdmin(http.HandlerFunc(a.subscriptionQRCode)))
 	mux.Handle("GET /admin/subscriptions/{id}/logs", a.requireAdmin(http.HandlerFunc(a.subscriptionLogs)))
 	mux.Handle("POST /admin/subscriptions/{id}/logs/clear", a.requireAdmin(a.requireCSRF(http.HandlerFunc(a.clearSubscriptionLogs))))
+	mux.Handle("POST /admin/subscriptions/{id}/file", a.requireAdmin(a.requireCSRF(http.HandlerFunc(a.replaceSubscriptionFile))))
+	mux.Handle("POST /admin/subscriptions/{id}/file/delete", a.requireAdmin(a.requireCSRF(http.HandlerFunc(a.detachSubscriptionFile))))
+	mux.Handle("GET /admin/subscriptions/{id}/file/download", a.requireAdmin(http.HandlerFunc(a.downloadSubscriptionFile)))
+	mux.Handle("GET /admin/files", a.requireAdmin(http.HandlerFunc(a.filesPage)))
+	mux.Handle("GET /admin/files/{id}", a.requireAdmin(http.HandlerFunc(a.fileDetailsPage)))
+	mux.Handle("GET /admin/files/{id}/download", a.requireAdmin(http.HandlerFunc(a.downloadStoredFile)))
+	mux.Handle("GET /admin/files/{id}/subscriptions/new", a.requireAdmin(http.HandlerFunc(a.newFileAssociationPage)))
+	mux.Handle("POST /admin/files/{id}/subscriptions", a.requireAdmin(a.requireCSRF(http.HandlerFunc(a.createFileAssociation))))
+	mux.Handle("POST /admin/files/{id}/delete", a.requireAdmin(a.requireCSRF(http.HandlerFunc(a.deleteStoredFile))))
 	mux.Handle("GET /admin/settings", a.requireAdmin(http.HandlerFunc(a.settingsPage)))
 	mux.Handle("POST /admin/settings", a.requireAdmin(a.requireCSRF(http.HandlerFunc(a.updateSettings))))
 	mux.HandleFunc("GET /", a.publicSubscription)
@@ -205,7 +250,11 @@ func (a *App) requestLogger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/admin/") {
-			r.Body = http.MaxBytesReader(w, r.Body, 3*1024*1024)
+			limit := int64(3 * 1024 * 1024)
+			if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+				limit = a.cfg.MaxUploadBytes + 1024*1024
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
 		}
 		next.ServeHTTP(w, r)
 		if r.URL.Path != "/healthz" && !strings.HasPrefix(r.URL.Path, "/admin/static/") {
@@ -242,6 +291,14 @@ func messageFromQuery(value string) string {
 		return "访问日志已清空（累计拉取次数保留）"
 	case "settings-updated":
 		return "系统设置已保存"
+	case "file-replaced":
+		return "订阅文件已替换"
+	case "file-detached":
+		return "订阅文件已删除，订阅已自动停用；原始文件仍保留在文件管理中"
+	case "file-deleted":
+		return "文件已彻底删除"
+	case "association-created":
+		return "关联订阅已创建"
 	default:
 		return ""
 	}

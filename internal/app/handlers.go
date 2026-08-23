@@ -155,7 +155,11 @@ func (a *App) changePassword(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) dashboard(w http.ResponseWriter, r *http.Request) {
 	auth, _ := getAuth(r)
-	subscriptions, err := a.store.ListSubscriptions(r.Context())
+	subscriptionType := r.URL.Query().Get("type")
+	if subscriptionType != SubscriptionTypeFile {
+		subscriptionType = SubscriptionTypeText
+	}
+	subscriptions, err := a.store.ListSubscriptionsByType(r.Context(), subscriptionType)
 	if err != nil {
 		a.renderError(w, http.StatusInternalServerError, "无法读取订阅列表")
 		return
@@ -166,7 +170,7 @@ func (a *App) dashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	a.render(w, "dashboard.html", viewData{
 		Title: "订阅管理", CSRF: auth.Session.CSRFToken, Subscriptions: subscriptions,
-		BaseURL: a.baseURL(r), Message: message,
+		BaseURL: a.baseURL(r), Message: message, SubscriptionType: subscriptionType,
 	})
 }
 
@@ -177,18 +181,31 @@ func (a *App) newSubscriptionPage(w http.ResponseWriter, r *http.Request) {
 		a.renderError(w, http.StatusInternalServerError, "无法生成订阅路径")
 		return
 	}
+	subscriptionType := r.URL.Query().Get("type")
+	if subscriptionType != SubscriptionTypeFile {
+		subscriptionType = SubscriptionTypeText
+	}
+	title := "新增文本订阅"
+	if subscriptionType == SubscriptionTypeFile {
+		title = "新增文件订阅"
+	}
 	a.render(w, "subscription_form.html", viewData{
-		Title: "新增订阅", CSRF: auth.Session.CSRFToken, IsNew: true,
-		Subscription: Subscription{Path: path, Enabled: true},
+		Title: title, CSRF: auth.Session.CSRFToken, IsNew: true, SubscriptionType: subscriptionType,
+		Subscription: Subscription{Path: path, Enabled: true, Type: subscriptionType}, MaxUploadMiB: a.cfg.MaxUploadBytes / (1024 * 1024),
 	})
 }
 
 func (a *App) createSubscription(w http.ResponseWriter, r *http.Request) {
 	auth, _ := getAuth(r)
 	sub := subscriptionFromForm(r)
+	if sub.Type == SubscriptionTypeFile {
+		a.createUploadedFileSubscription(w, r, auth, sub)
+		return
+	}
+	sub.Type = SubscriptionTypeText
 	if err := validateSubscription(sub.Name, sub.Path, sub.Content); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		a.render(w, "subscription_form.html", viewData{Title: "新增订阅", CSRF: auth.Session.CSRFToken, IsNew: true, Subscription: sub, Error: err.Error()})
+		a.render(w, "subscription_form.html", viewData{Title: "新增文本订阅", CSRF: auth.Session.CSRFToken, IsNew: true, SubscriptionType: sub.Type, Subscription: sub, Error: err.Error()})
 		return
 	}
 	if sub.Name == "" {
@@ -201,10 +218,10 @@ func (a *App) createSubscription(w http.ResponseWriter, r *http.Request) {
 			message = "该订阅路径已经存在"
 		}
 		w.WriteHeader(http.StatusBadRequest)
-		a.render(w, "subscription_form.html", viewData{Title: "新增订阅", CSRF: auth.Session.CSRFToken, IsNew: true, Subscription: sub, Error: message})
+		a.render(w, "subscription_form.html", viewData{Title: "新增文本订阅", CSRF: auth.Session.CSRFToken, IsNew: true, SubscriptionType: sub.Type, Subscription: sub, Error: message})
 		return
 	}
-	http.Redirect(w, r, "/admin/?message=created", http.StatusSeeOther)
+	http.Redirect(w, r, subscriptionListURL(SubscriptionTypeText, "created"), http.StatusSeeOther)
 }
 
 func (a *App) editSubscriptionPage(w http.ResponseWriter, r *http.Request) {
@@ -213,7 +230,17 @@ func (a *App) editSubscriptionPage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	a.render(w, "subscription_form.html", viewData{Title: "编辑订阅", CSRF: auth.Session.CSRFToken, Subscription: sub})
+	data := viewData{Title: "编辑订阅", CSRF: auth.Session.CSRFToken, Subscription: sub, SubscriptionType: sub.Type,
+		MaxUploadMiB: a.cfg.MaxUploadBytes / (1024 * 1024), Message: messageFromQuery(r.URL.Query().Get("message"))}
+	if sub.Type == SubscriptionTypeFile && sub.FileID > 0 {
+		file, err := a.store.FileByID(r.Context(), sub.FileID)
+		if err != nil {
+			a.renderError(w, http.StatusInternalServerError, "无法读取关联文件")
+			return
+		}
+		data.File = file
+	}
+	a.render(w, "subscription_form.html", data)
 }
 
 func (a *App) updateSubscription(w http.ResponseWriter, r *http.Request) {
@@ -225,34 +252,68 @@ func (a *App) updateSubscription(w http.ResponseWriter, r *http.Request) {
 	}
 	sub := subscriptionFromForm(r)
 	sub.ID = id
-	if err := validateSubscription(sub.Name, sub.Path, sub.Content); err != nil {
+	existing, err := a.store.SubscriptionByID(r.Context(), id)
+	if err != nil {
+		a.renderError(w, http.StatusNotFound, "订阅不存在")
+		return
+	}
+	sub.Type = existing.Type
+	sub.FileID = existing.FileID
+	sub.DownloadName = existing.DownloadName
+	var validationErr error
+	if sub.Type == SubscriptionTypeFile {
+		validationErr = validateSubscriptionMetadata(sub.Name, sub.Path)
+		if validationErr == nil && sub.Enabled && sub.FileID == 0 {
+			validationErr = errors.New("请先上传文件再启用订阅")
+		}
+	} else {
+		validationErr = validateSubscription(sub.Name, sub.Path, sub.Content)
+	}
+	if validationErr != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		a.render(w, "subscription_form.html", viewData{Title: "编辑订阅", CSRF: auth.Session.CSRFToken, Subscription: sub, Error: err.Error()})
+		data := viewData{Title: "编辑订阅", CSRF: auth.Session.CSRFToken, SubscriptionType: sub.Type, Subscription: sub, Error: validationErr.Error(), MaxUploadMiB: a.cfg.MaxUploadBytes / (1024 * 1024)}
+		if sub.FileID > 0 {
+			data.File, _ = a.store.FileByID(r.Context(), sub.FileID)
+		}
+		a.render(w, "subscription_form.html", data)
 		return
 	}
 	if sub.Name == "" {
 		sub.Name = strings.TrimPrefix(sub.Path, "/")
 	}
-	err = a.store.UpdateSubscription(r.Context(), id, sub.Name, sub.Path, normalizeContent(sub.Content), sub.Enabled)
+	if sub.Type == SubscriptionTypeFile {
+		err = a.store.UpdateFileSubscription(r.Context(), id, sub.Name, sub.Path, sub.Enabled)
+	} else {
+		err = a.store.UpdateSubscription(r.Context(), id, sub.Name, sub.Path, normalizeContent(sub.Content), sub.Enabled)
+	}
 	if err != nil {
 		message := "无法保存订阅"
 		if isUniquePathError(err) {
 			message = "该订阅路径已经存在"
 		}
 		w.WriteHeader(http.StatusBadRequest)
-		a.render(w, "subscription_form.html", viewData{Title: "编辑订阅", CSRF: auth.Session.CSRFToken, Subscription: sub, Error: message})
+		data := viewData{Title: "编辑订阅", CSRF: auth.Session.CSRFToken, SubscriptionType: sub.Type, Subscription: sub, Error: message, MaxUploadMiB: a.cfg.MaxUploadBytes / (1024 * 1024)}
+		if sub.FileID > 0 {
+			data.File, _ = a.store.FileByID(r.Context(), sub.FileID)
+		}
+		a.render(w, "subscription_form.html", data)
 		return
 	}
-	http.Redirect(w, r, "/admin/?message=updated", http.StatusSeeOther)
+	http.Redirect(w, r, subscriptionListURL(sub.Type, "updated"), http.StatusSeeOther)
 }
 
 func (a *App) deleteSubscription(w http.ResponseWriter, r *http.Request) {
 	id, err := parseID(r)
+	if err != nil {
+		a.renderError(w, http.StatusNotFound, "订阅不存在")
+		return
+	}
+	sub, err := a.store.SubscriptionByID(r.Context(), id)
 	if err != nil || a.store.DeleteSubscription(r.Context(), id) != nil {
 		a.renderError(w, http.StatusNotFound, "订阅不存在")
 		return
 	}
-	http.Redirect(w, r, "/admin/?message=deleted", http.StatusSeeOther)
+	http.Redirect(w, r, subscriptionListURL(sub.Type, "deleted"), http.StatusSeeOther)
 }
 
 func (a *App) toggleSubscription(w http.ResponseWriter, r *http.Request) {
@@ -260,11 +321,15 @@ func (a *App) toggleSubscription(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if sub.Type == SubscriptionTypeFile && !sub.Enabled && sub.FileID == 0 {
+		a.renderError(w, http.StatusBadRequest, "该文件订阅尚未关联文件，无法启用")
+		return
+	}
 	if err := a.store.SetSubscriptionEnabled(r.Context(), sub.ID, !sub.Enabled); err != nil {
 		a.renderError(w, http.StatusInternalServerError, "无法更新订阅状态")
 		return
 	}
-	http.Redirect(w, r, "/admin/?message=toggled", http.StatusSeeOther)
+	http.Redirect(w, r, subscriptionListURL(sub.Type, "toggled"), http.StatusSeeOther)
 }
 
 func (a *App) batchContent(w http.ResponseWriter, r *http.Request) {
@@ -304,12 +369,16 @@ func (a *App) batchContent(w http.ResponseWriter, r *http.Request) {
 		a.renderError(w, http.StatusBadRequest, "部分订阅不存在，请刷新页面后重试")
 		return
 	}
-	http.Redirect(w, r, "/admin/?message=batch-updated", http.StatusSeeOther)
+	http.Redirect(w, r, subscriptionListURL(SubscriptionTypeText, "batch-updated"), http.StatusSeeOther)
 }
 
 func (a *App) previewSubscription(w http.ResponseWriter, r *http.Request) {
 	sub, ok := a.loadSubscription(w, r)
 	if !ok {
+		return
+	}
+	if sub.Type != SubscriptionTypeText {
+		a.renderError(w, http.StatusNotFound, "文件订阅不支持 Base64 预览")
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -320,6 +389,10 @@ func (a *App) previewSubscription(w http.ResponseWriter, r *http.Request) {
 func (a *App) subscriptionQRCode(w http.ResponseWriter, r *http.Request) {
 	sub, ok := a.loadSubscription(w, r)
 	if !ok {
+		return
+	}
+	if sub.Type != SubscriptionTypeText {
+		a.renderError(w, http.StatusNotFound, "文件订阅不提供二维码")
 		return
 	}
 	subscriptionURL := a.baseURL(r) + sub.Path
@@ -443,7 +516,11 @@ func (a *App) publicSubscription(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ip := a.clientIP(r)
-	if err := a.store.RecordAccess(r.Context(), sub.ID, ip, detectClient(userAgent), userAgent, r.Method, http.StatusOK); err != nil {
+	if sub.Type == SubscriptionTypeFile {
+		a.publicFileSubscription(w, r, sub, ip, userAgent)
+		return
+	}
+	if err := a.store.RecordAccess(r.Context(), sub.ID, 0, ip, detectClient(userAgent), userAgent, r.Method, http.StatusOK); err != nil {
 		a.logger.Error("record subscription access", "subscription_id", sub.ID, "error", err)
 		a.renderError(w, http.StatusInternalServerError, "暂时无法生成订阅")
 		return
@@ -475,8 +552,22 @@ func (a *App) loadSubscription(w http.ResponseWriter, r *http.Request) (Subscrip
 func subscriptionFromForm(r *http.Request) Subscription {
 	return Subscription{
 		Name: strings.TrimSpace(r.FormValue("name")), Path: strings.TrimSpace(r.FormValue("path")),
-		Content: r.FormValue("content"), Enabled: r.FormValue("enabled") == "1",
+		Content: r.FormValue("content"), Type: strings.TrimSpace(r.FormValue("type")), Enabled: r.FormValue("enabled") == "1",
 	}
+}
+
+func subscriptionListURL(subscriptionType, message string) string {
+	values := url.Values{}
+	if subscriptionType == SubscriptionTypeFile {
+		values.Set("type", SubscriptionTypeFile)
+	}
+	if message != "" {
+		values.Set("message", message)
+	}
+	if query := values.Encode(); query != "" {
+		return "/admin/?" + query
+	}
+	return "/admin/"
 }
 
 func (a *App) baseURL(r *http.Request) string {

@@ -15,6 +15,19 @@ var reservedPaths = map[string]bool{
 }
 
 func validateSubscription(name, path, content string) error {
+	if err := validateSubscriptionMetadata(name, path); err != nil {
+		return err
+	}
+	if strings.TrimSpace(content) == "" {
+		return errors.New("节点内容不能为空")
+	}
+	if len(content) > 2*1024*1024 {
+		return errors.New("节点内容不能超过 2 MiB")
+	}
+	return nil
+}
+
+func validateSubscriptionMetadata(name, path string) error {
 	if utf8.RuneCountInString(name) > 100 {
 		return errors.New("订阅名称不能超过 100 个字符")
 	}
@@ -23,12 +36,6 @@ func validateSubscription(name, path, content string) error {
 	}
 	if reservedPaths[strings.ToLower(path)] {
 		return errors.New("该路径为系统保留路径，请更换")
-	}
-	if strings.TrimSpace(content) == "" {
-		return errors.New("节点内容不能为空")
-	}
-	if len(content) > 2*1024*1024 {
-		return errors.New("节点内容不能超过 2 MiB")
 	}
 	return nil
 }

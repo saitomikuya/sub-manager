@@ -2,6 +2,7 @@
 .gitignore
 .env
 data
+files
 *.db
 *.db-shm
 *.db-wal
