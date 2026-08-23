@@ -249,4 +249,4 @@ GitHub 仓库需要配置两个 Actions Secrets：
 - `DOCKERHUB_USERNAME`
 - `DOCKERHUB_TOKEN_RELEASE`
 
-配置完成后，在 GitHub 仓库的 **Actions → Build and publish Docker image → Run workflow** 中手动发布。工作流会运行测试，推送版本号、提交 SHA 和 `latest` 标签，验证多架构清单与容器健康状态，并把本 README 同步到 Docker Hub 仓库介绍页。
+配置完成后，在 GitHub 仓库的 **Actions → Build and publish Docker image → Run workflow** 中手动发布。工作流会运行测试，推送版本号、提交 SHA 和 `latest` 标签，并验证多架构清单与容器健康状态。
