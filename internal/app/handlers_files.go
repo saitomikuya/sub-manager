@@ -206,7 +206,45 @@ func (a *App) fileDetailsPage(w http.ResponseWriter, r *http.Request) {
 	a.render(w, "file_details.html", viewData{
 		Title: file.OriginalName, CSRF: auth.Session.CSRFToken, File: file,
 		FileAssociations: associations, BaseURL: a.baseURL(r), Message: messageFromQuery(r.URL.Query().Get("message")),
+		MaxUploadMiB: a.cfg.MaxUploadBytes / (1024 * 1024),
 	})
+}
+
+func (a *App) replaceStoredFile(w http.ResponseWriter, r *http.Request) {
+	oldFile, ok := a.loadStoredFile(w, r)
+	if !ok {
+		return
+	}
+	if oldFile.AssociationCount == 0 {
+		a.renderError(w, http.StatusConflict, "该文件没有关联订阅，请先创建关联订阅")
+		return
+	}
+	upload, header, err := r.FormFile("file")
+	if err != nil {
+		a.renderError(w, http.StatusBadRequest, a.fileSelectionError(err))
+		return
+	}
+	defer upload.Close()
+	file, err := a.saveUploadedFile(r.Context(), upload, header)
+	if err != nil {
+		a.logger.Error("replace stored file", "file_id", oldFile.ID, "error", err)
+		a.renderError(w, http.StatusBadRequest, uploadErrorMessage(err, a.cfg.MaxUploadBytes))
+		return
+	}
+	if _, err := a.store.ReplaceFileAssociations(r.Context(), oldFile.ID, file.ID, headerFilename(header)); err != nil {
+		if errors.Is(err, errNoFileAssociations) || errors.Is(err, sql.ErrNoRows) {
+			a.renderError(w, http.StatusConflict, "文件关联已变更，请返回文件管理刷新后重试；上传文件已保存在文件管理中")
+		} else {
+			a.logger.Error("replace file associations", "file_id", oldFile.ID, "error", err)
+			a.renderError(w, http.StatusInternalServerError, "无法更新关联订阅；上传文件已保存在文件管理中")
+		}
+		return
+	}
+	message := "file-associations-replaced"
+	if oldFile.ID == file.ID {
+		message = "file-unchanged"
+	}
+	http.Redirect(w, r, fmt.Sprintf("/admin/files/%d?message=%s", file.ID, message), http.StatusSeeOther)
 }
 
 func (a *App) downloadStoredFile(w http.ResponseWriter, r *http.Request) {
@@ -324,7 +362,7 @@ func (a *App) publicFileSubscription(w http.ResponseWriter, r *http.Request, sub
 		return
 	}
 	if r.Method == http.MethodGet {
-		if err := a.store.RecordAccess(r.Context(), sub.ID, file.ID, ip, detectClient(userAgent), userAgent, r.Method, http.StatusOK); err != nil {
+		if err := a.store.RecordAccess(r.Context(), sub, file.ID, ip, detectClient(userAgent), userAgent, r.Method, http.StatusOK); err != nil {
 			a.logger.Error("record file subscription access", "subscription_id", sub.ID, "file_id", file.ID, "error", err)
 			a.renderError(w, http.StatusInternalServerError, "暂时无法下载订阅文件")
 			return

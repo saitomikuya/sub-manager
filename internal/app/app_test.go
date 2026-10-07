@@ -673,7 +673,7 @@ func TestReplaceFilePreservesSubscriptionCountAndSeparatesFileCount(t *testing.T
 		t.Fatalf("replacement response = %q", body)
 	}
 	sub, _ := application.store.SubscriptionByID(context.Background(), subs[0].ID)
-	if sub.FetchCount != 2 || sub.FileID == oldFileID {
+	if sub.FetchCount != 2 || sub.CurrentFetchCount != 1 || sub.FileID == oldFileID {
 		t.Fatalf("subscription after replacement = %+v", sub)
 	}
 	oldFile, _ := application.store.FileByID(context.Background(), oldFileID)

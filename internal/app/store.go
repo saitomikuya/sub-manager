@@ -31,19 +31,21 @@ type Session struct {
 }
 
 type Subscription struct {
-	ID            int64
-	Name          string
-	Path          string
-	Content       string
-	Type          string
-	FileID        int64
-	DownloadName  string
-	Enabled       bool
-	FetchCount    int64
-	LastFetchedAt *time.Time
-	LastFetchedIP string
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	ID                int64
+	Name              string
+	Path              string
+	Content           string
+	Type              string
+	FileID            int64
+	DownloadName      string
+	Enabled           bool
+	FetchCount        int64
+	CurrentFetchCount int64
+	FileRevision      int64
+	LastFetchedAt     *time.Time
+	LastFetchedIP     string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 const (
@@ -198,6 +200,7 @@ func (s *Store) migrate(defaultPasswordHash []byte, defaultRetention int) error 
 		{"subscriptions", "type", `TEXT NOT NULL DEFAULT 'text' CHECK(type IN ('text', 'file'))`},
 		{"subscriptions", "file_id", `INTEGER REFERENCES files(id) ON DELETE RESTRICT`},
 		{"subscriptions", "download_name", `TEXT NOT NULL DEFAULT ''`},
+		{"subscriptions", "file_revision", `INTEGER NOT NULL DEFAULT 0`},
 		{"access_logs", "file_id", `INTEGER REFERENCES files(id) ON DELETE SET NULL`},
 	} {
 		if err := s.addColumnIfMissing(column.table, column.name, column.definition); err != nil {
@@ -221,11 +224,39 @@ func (s *Store) migrate(defaultPasswordHash []byte, defaultRetention int) error 
 			return fmt.Errorf("database migration: %w", err)
 		}
 	}
+	if err := s.migrateCurrentFetchCount(); err != nil {
+		return err
+	}
 	now := dbTime(time.Now())
 	_, err := s.db.Exec(`INSERT OR IGNORE INTO settings
 		(id, password_hash, must_change_password, session_version, log_retention_days, trusted_proxies, created_at, updated_at)
 		VALUES (1, ?, 1, 1, ?, '', ?, ?)`, defaultPasswordHash, defaultRetention, now, now)
 	return err
+}
+
+func (s *Store) migrateCurrentFetchCount() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var exists int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('subscriptions') WHERE name = 'current_fetch_count'`).Scan(&exists); err != nil {
+		return err
+	}
+	if exists == 0 {
+		if _, err := tx.Exec(`ALTER TABLE subscriptions ADD COLUMN current_fetch_count INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+		// Older versions only tracked lifetime totals for each file/subscription pair.
+		if _, err := tx.Exec(`UPDATE subscriptions SET current_fetch_count = COALESCE(
+			(SELECT download_count FROM file_subscription_stats
+			WHERE file_id = subscriptions.file_id AND subscription_id = subscriptions.id), 0)
+			WHERE type = 'file'`); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) addColumnIfMissing(table, name, definition string) error {
@@ -333,7 +364,7 @@ func (s *Store) ListSubscriptions(ctx context.Context) ([]Subscription, error) {
 }
 
 func (s *Store) ListSubscriptionsByType(ctx context.Context, subscriptionType string) ([]Subscription, error) {
-	query := `SELECT id, name, path, content, type, COALESCE(file_id, 0), download_name, enabled, fetch_count,
+	query := `SELECT id, name, path, content, type, COALESCE(file_id, 0), download_name, enabled, fetch_count, current_fetch_count, file_revision,
 		last_fetched_at, last_fetched_ip, created_at, updated_at FROM subscriptions`
 	var args []any
 	if subscriptionType != "" {
@@ -364,7 +395,7 @@ func scanSubscription(row scanner) (Subscription, error) {
 	var enabled int
 	var lastFetched sql.NullString
 	var created, updated string
-	err := row.Scan(&sub.ID, &sub.Name, &sub.Path, &sub.Content, &sub.Type, &sub.FileID, &sub.DownloadName, &enabled, &sub.FetchCount,
+	err := row.Scan(&sub.ID, &sub.Name, &sub.Path, &sub.Content, &sub.Type, &sub.FileID, &sub.DownloadName, &enabled, &sub.FetchCount, &sub.CurrentFetchCount, &sub.FileRevision,
 		&lastFetched, &sub.LastFetchedIP, &created, &updated)
 	if err != nil {
 		return sub, err
@@ -389,13 +420,13 @@ func scanSubscription(row scanner) (Subscription, error) {
 }
 
 func (s *Store) SubscriptionByID(ctx context.Context, id int64) (Subscription, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, name, path, content, type, COALESCE(file_id, 0), download_name, enabled, fetch_count,
+	row := s.db.QueryRowContext(ctx, `SELECT id, name, path, content, type, COALESCE(file_id, 0), download_name, enabled, fetch_count, current_fetch_count, file_revision,
 		last_fetched_at, last_fetched_ip, created_at, updated_at FROM subscriptions WHERE id = ?`, id)
 	return scanSubscription(row)
 }
 
 func (s *Store) SubscriptionByPath(ctx context.Context, path string) (Subscription, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, name, path, content, type, COALESCE(file_id, 0), download_name, enabled, fetch_count,
+	row := s.db.QueryRowContext(ctx, `SELECT id, name, path, content, type, COALESCE(file_id, 0), download_name, enabled, fetch_count, current_fetch_count, file_revision,
 		last_fetched_at, last_fetched_ip, created_at, updated_at FROM subscriptions WHERE path = ? AND enabled = 1`, path)
 	return scanSubscription(row)
 }
@@ -441,16 +472,53 @@ func (s *Store) UpdateFileSubscription(ctx context.Context, id int64, name, path
 }
 
 func (s *Store) ReplaceSubscriptionFile(ctx context.Context, id, fileID int64, downloadName string) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE subscriptions SET file_id = ?, download_name = ?, updated_at = ?
-		WHERE id = ? AND type = 'file'`, fileID, downloadName, dbTime(time.Now()), id)
+	result, err := s.db.ExecContext(ctx, `UPDATE subscriptions SET
+		current_fetch_count = CASE WHEN file_id IS ? THEN current_fetch_count ELSE 0 END,
+		file_revision = file_revision + CASE WHEN file_id IS ? THEN 0 ELSE 1 END,
+		file_id = ?, download_name = ?, updated_at = ?
+		WHERE id = ? AND type = 'file'`, fileID, fileID, fileID, downloadName, dbTime(time.Now()), id)
 	if err != nil {
 		return err
 	}
 	return expectOne(result)
 }
 
+var errNoFileAssociations = errors.New("file has no associated subscriptions")
+
+func (s *Store) ReplaceFileAssociations(ctx context.Context, oldFileID, newFileID int64, downloadName string) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	for _, id := range []int64{oldFileID, newFileID} {
+		var exists int
+		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM files WHERE id = ?`, id).Scan(&exists); err != nil {
+			return 0, err
+		}
+	}
+	if oldFileID == newFileID {
+		return 0, tx.Commit()
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE subscriptions SET
+		file_id = ?, download_name = ?, current_fetch_count = 0, file_revision = file_revision + 1, updated_at = ?
+		WHERE type = 'file' AND file_id = ?`, newFileID, downloadName, dbTime(time.Now()), oldFileID)
+	if err != nil {
+		return 0, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if count == 0 {
+		return 0, errNoFileAssociations
+	}
+	return count, tx.Commit()
+}
+
 func (s *Store) DetachSubscriptionFile(ctx context.Context, id int64) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE subscriptions SET file_id = NULL, download_name = '', enabled = 0, updated_at = ?
+	result, err := s.db.ExecContext(ctx, `UPDATE subscriptions SET file_id = NULL, download_name = '', enabled = 0,
+		current_fetch_count = 0, file_revision = file_revision + 1, updated_at = ?
 		WHERE id = ? AND type = 'file'`, dbTime(time.Now()), id)
 	if err != nil {
 		return err
@@ -520,15 +588,17 @@ func (s *Store) BatchUpdateContent(ctx context.Context, ids []int64, content str
 	return updated, nil
 }
 
-func (s *Store) RecordAccess(ctx context.Context, subscriptionID, fileID int64, ip, client, userAgent, method string, status int) error {
+func (s *Store) RecordAccess(ctx context.Context, sub Subscription, fileID int64, ip, client, userAgent, method string, status int) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	now := dbTime(time.Now())
+	// Requests already serving an older revision still count toward history only.
 	result, err := tx.ExecContext(ctx, `UPDATE subscriptions SET fetch_count = fetch_count + 1,
-		last_fetched_at = ?, last_fetched_ip = ? WHERE id = ?`, now, ip, subscriptionID)
+		current_fetch_count = current_fetch_count + CASE WHEN type = 'file' AND file_id = ? AND file_revision = ? THEN 1 ELSE 0 END,
+		last_fetched_at = ?, last_fetched_ip = ? WHERE id = ?`, fileID, sub.FileRevision, now, ip, sub.ID)
 	if err != nil {
 		return err
 	}
@@ -550,7 +620,7 @@ func (s *Store) RecordAccess(ctx context.Context, subscriptionID, fileID int64, 
 			ON CONFLICT(file_id, subscription_id) DO UPDATE SET
 				download_count = download_count + 1,
 				last_downloaded_at = excluded.last_downloaded_at,
-				last_downloaded_ip = excluded.last_downloaded_ip`, fileID, subscriptionID, now, ip); err != nil {
+				last_downloaded_ip = excluded.last_downloaded_ip`, fileID, sub.ID, now, ip); err != nil {
 			return err
 		}
 	}
@@ -560,7 +630,7 @@ func (s *Store) RecordAccess(ctx context.Context, subscriptionID, fileID int64, 
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO access_logs
 		(subscription_id, file_id, requested_at, client_ip, client_name, user_agent, method, status_code)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, subscriptionID, nullableFileID, now, ip, client, userAgent, method, status); err != nil {
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, sub.ID, nullableFileID, now, ip, client, userAgent, method, status); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -702,7 +772,7 @@ func (s *Store) ListFiles(ctx context.Context) ([]StoredFile, error) {
 
 func (s *Store) FileAssociations(ctx context.Context, fileID int64) ([]FileAssociation, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT s.id, s.name, s.path, s.content, s.type, COALESCE(s.file_id, 0),
-		s.download_name, s.enabled, s.fetch_count, s.last_fetched_at, s.last_fetched_ip, s.created_at, s.updated_at,
+		s.download_name, s.enabled, s.fetch_count, s.current_fetch_count, s.file_revision, s.last_fetched_at, s.last_fetched_ip, s.created_at, s.updated_at,
 		COALESCE(fs.download_count, 0), fs.last_downloaded_at, COALESCE(fs.last_downloaded_ip, '')
 		FROM subscriptions s
 		LEFT JOIN file_subscription_stats fs ON fs.subscription_id = s.id AND fs.file_id = ?
@@ -719,7 +789,8 @@ func (s *Store) FileAssociations(ctx context.Context, fileID int64) ([]FileAssoc
 		var created, updated string
 		err := rows.Scan(&association.Subscription.ID, &association.Subscription.Name, &association.Subscription.Path,
 			&association.Subscription.Content, &association.Subscription.Type, &association.Subscription.FileID,
-			&association.Subscription.DownloadName, &enabled, &association.Subscription.FetchCount, &subLast,
+			&association.Subscription.DownloadName, &enabled, &association.Subscription.FetchCount,
+			&association.Subscription.CurrentFetchCount, &association.Subscription.FileRevision, &subLast,
 			&association.Subscription.LastFetchedIP, &created, &updated, &association.DownloadCount, &pairLast,
 			&association.LastFetchedIP)
 		if err != nil {

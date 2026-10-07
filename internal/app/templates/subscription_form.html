@@ -41,7 +41,7 @@
 
     {{if and (not .IsNew) (eq .SubscriptionType "file")}}
     <section class="form-card stack file-management-card">
-      <div><h2>文件管理</h2><p>替换或删除关联只影响此订阅；原始文件仍由文件管理统一维护。</p></div>
+      <div><h2>文件管理</h2><p>此处替换为不同文件会重置本订阅的更新后拉取次数。需要同步更新所有关联订阅时，请进入文件详情使用“更新替换文件”。</p></div>
       {{if .File.ID}}
       <div class="file-summary">
         <div><strong>{{.Subscription.DownloadName}}</strong><small>{{formatBytes .File.Size}} · {{.File.ContentType}}</small></div>

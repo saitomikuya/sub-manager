@@ -12,12 +12,23 @@
     <section class="form-card file-info-card">
       <div class="file-info-heading"><h2>文件信息</h2>{{if eq .File.AssociationCount 0}}<form method="post" action="/admin/files/{{.File.ID}}/delete" data-confirm="确定彻底删除该原始文件吗？该操作不可恢复。"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><button class="button small danger" type="submit">彻底删除文件</button></form>{{end}}</div>
       <dl class="details-list file-details-list"><div><dt>MD5</dt><dd><code>{{.File.MD5}}</code></dd></div><div><dt>SHA-256</dt><dd><code>{{.File.SHA256}}</code></dd></div><div><dt>文件累计下载</dt><dd><strong>{{.File.DownloadCount}}</strong> 次</dd></div><div><dt>最后下载</dt><dd>{{formatTime .File.LastDownloadedAt}}{{if .File.LastDownloadedIP}}<small>{{.File.LastDownloadedIP}}</small>{{end}}</dd></div></dl>
+      {{if .File.AssociationCount}}
+      <details class="file-replace">
+        <summary>更新替换文件</summary>
+        <form method="post" action="/admin/files/{{.File.ID}}/replace" enctype="multipart/form-data" class="stack" data-confirm="确定替换文件并同步更新所有关联订阅吗？更新后拉取次数将从零开始统计。">
+          <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+          <p>上传新文件后，当前关联的 {{.File.AssociationCount}} 个订阅将同步更新，更新后拉取次数从零开始统计。原文件和历史日志保留在系统中。</p>
+          <label><span>选择替换文件</span><input type="file" name="file" required><small>最大 {{.MaxUploadMiB}} MiB，相同内容自动去重；上传与当前文件相同的内容会保留拉取次数。</small></label>
+          <div class="form-actions"><button type="submit" class="button primary">替换并更新所有关联订阅</button></div>
+        </form>
+      </details>
+      {{end}}
     </section>
     <div class="table-card association-table">
       <div class="association-heading"><div class="association-title"><h2>当前关联订阅</h2><span class="association-count">{{.File.AssociationCount}}</span></div><p>“该文件下载”仅统计此文件通过对应订阅产生的下载。</p></div>
-      <div class="table-scroll"><table><thead><tr><th>订阅</th><th>状态</th><th>该文件下载</th><th>最后下载</th><th>订阅累计拉取</th><th>操作</th></tr></thead><tbody>
-      {{range .FileAssociations}}<tr><td><strong>{{.Subscription.Name}}</strong><div class="subscription-url"><code>{{$.BaseURL}}{{.Subscription.Path}}</code><button type="button" class="icon-button" data-copy="{{$.BaseURL}}{{.Subscription.Path}}">复制</button></div></td><td>{{if .Subscription.Enabled}}<span class="badge success">已启用</span>{{else}}<span class="badge muted-badge">已停用</span>{{end}}</td><td><strong>{{.DownloadCount}}</strong> 次</td><td>{{formatTime .LastFetchedAt}}{{if .LastFetchedIP}}<div><small>{{.LastFetchedIP}}</small></div>{{end}}</td><td>{{.Subscription.FetchCount}} 次</td><td><a class="button small" href="/admin/subscriptions/{{.Subscription.ID}}">编辑</a></td></tr>
-      {{else}}<tr><td colspan="6" class="empty-row">当前没有关联订阅，可通过“创建关联订阅”直接复用此文件。</td></tr>{{end}}
+      <div class="table-scroll"><table><thead><tr><th>订阅</th><th>状态</th><th>更新后拉取</th><th>该文件下载</th><th>最后下载</th><th>订阅累计拉取</th><th>操作</th></tr></thead><tbody>
+      {{range .FileAssociations}}<tr><td><strong>{{.Subscription.Name}}</strong><div class="subscription-url"><code>{{$.BaseURL}}{{.Subscription.Path}}</code><button type="button" class="icon-button" data-copy="{{$.BaseURL}}{{.Subscription.Path}}">复制</button></div></td><td>{{if .Subscription.Enabled}}<span class="badge success">已启用</span>{{else}}<span class="badge muted-badge">已停用</span>{{end}}</td><td><strong>{{.Subscription.CurrentFetchCount}}</strong> 次</td><td>{{.DownloadCount}} 次</td><td>{{formatTime .LastFetchedAt}}{{if .LastFetchedIP}}<div><small>{{.LastFetchedIP}}</small></div>{{end}}</td><td>{{.Subscription.FetchCount}} 次</td><td><a class="button small" href="/admin/subscriptions/{{.Subscription.ID}}">编辑</a></td></tr>
+      {{else}}<tr><td colspan="7" class="empty-row">当前没有关联订阅，可通过“创建关联订阅”直接复用此文件。</td></tr>{{end}}
     </tbody></table></div></div>
   </main><div class="toast" data-toast hidden></div>
 </body>

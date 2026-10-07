@@ -85,6 +85,9 @@ input:focus,textarea:focus,select:focus { border-color:var(--primary); box-shado
 .file-details-list dt { min-width:0; font-size:12px; font-weight:700; }
 .file-details-list dd { line-height:1.5; }
 .file-details-list dd small { display:block; margin-top:2px; color:var(--muted); }
+.file-replace { margin-top:18px; padding-top:16px; border-top:1px solid var(--line); }
+.file-replace summary { color:var(--primary); font-weight:600; cursor:pointer; }
+.file-replace form { margin-top:16px; }
 .association-table { margin-top:18px; }
 .association-heading { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:17px 20px; border-bottom:1px solid var(--line); background:#fff; }
 .association-title { display:flex; align-items:center; gap:9px; }

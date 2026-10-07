@@ -29,15 +29,15 @@
     <div class="table-card">
       <div class="table-scroll">
         <table>
-          <thead><tr>{{if eq .SubscriptionType "text"}}<th class="check-col"><input type="checkbox" data-select-all aria-label="全选"></th>{{end}}<th>名称与地址</th>{{if eq .SubscriptionType "file"}}<th>关联文件</th>{{end}}<th>状态</th><th>累计拉取</th><th>最后拉取</th><th class="actions-col">操作</th></tr></thead>
+          <thead><tr>{{if eq .SubscriptionType "text"}}<th class="check-col"><input type="checkbox" data-select-all aria-label="全选"></th>{{end}}<th>名称与地址</th>{{if eq .SubscriptionType "file"}}<th>关联文件</th>{{end}}<th>状态</th><th>{{if eq .SubscriptionType "file"}}更新后拉取{{else}}累计拉取{{end}}</th><th>最后拉取</th><th class="actions-col">操作</th></tr></thead>
           <tbody>
           {{range .Subscriptions}}
             <tr>
               {{if eq $.SubscriptionType "text"}}<td><input type="checkbox" name="subscription_ids" value="{{.ID}}" form="batch-form" data-subscription-check aria-label="选择 {{.Name}}"></td>{{end}}
               <td><strong>{{.Name}}</strong><div class="subscription-url"><code>{{$.BaseURL}}{{.Path}}</code><button type="button" class="icon-button" data-copy="{{$.BaseURL}}{{.Path}}" title="复制订阅地址">复制</button></div></td>
-              {{if eq $.SubscriptionType "file"}}<td>{{if .FileID}}<span title="{{.DownloadName}}">{{.DownloadName}}</span>{{else}}<span class="badge warning">未关联文件</span>{{end}}</td>{{end}}
+              {{if eq $.SubscriptionType "file"}}<td>{{if .FileID}}<a href="/admin/files/{{.FileID}}" title="查看文件详情并更新所有关联订阅">{{.DownloadName}}</a>{{else}}<span class="badge warning">未关联文件</span>{{end}}</td>{{end}}
               <td>{{if .Enabled}}<span class="badge success">已启用</span>{{else}}<span class="badge muted-badge">已停用</span>{{end}}</td>
-              <td><strong>{{.FetchCount}}</strong> 次</td>
+              <td><strong>{{if eq $.SubscriptionType "file"}}{{.CurrentFetchCount}}{{else}}{{.FetchCount}}{{end}}</strong> 次</td>
               <td><div>{{formatTime .LastFetchedAt}}</div>{{if .LastFetchedIP}}<small>{{.LastFetchedIP}}</small>{{end}}</td>
               <td><div class="action-group">
                 <a class="button small" href="/admin/subscriptions/{{.ID}}">编辑</a>

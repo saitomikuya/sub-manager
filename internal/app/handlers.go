@@ -520,7 +520,7 @@ func (a *App) publicSubscription(w http.ResponseWriter, r *http.Request) {
 		a.publicFileSubscription(w, r, sub, ip, userAgent)
 		return
 	}
-	if err := a.store.RecordAccess(r.Context(), sub.ID, 0, ip, detectClient(userAgent), userAgent, r.Method, http.StatusOK); err != nil {
+	if err := a.store.RecordAccess(r.Context(), sub, 0, ip, detectClient(userAgent), userAgent, r.Method, http.StatusOK); err != nil {
 		a.logger.Error("record subscription access", "subscription_id", sub.ID, "error", err)
 		a.renderError(w, http.StatusInternalServerError, "暂时无法生成订阅")
 		return

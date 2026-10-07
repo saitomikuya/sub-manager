@@ -179,6 +179,7 @@ func (a *App) Handler() http.Handler {
 	mux.Handle("GET /admin/subscriptions/{id}/file/download", a.requireAdmin(http.HandlerFunc(a.downloadSubscriptionFile)))
 	mux.Handle("GET /admin/files", a.requireAdmin(http.HandlerFunc(a.filesPage)))
 	mux.Handle("GET /admin/files/{id}", a.requireAdmin(http.HandlerFunc(a.fileDetailsPage)))
+	mux.Handle("POST /admin/files/{id}/replace", a.requireAdmin(a.requireCSRF(http.HandlerFunc(a.replaceStoredFile))))
 	mux.Handle("GET /admin/files/{id}/download", a.requireAdmin(http.HandlerFunc(a.downloadStoredFile)))
 	mux.Handle("GET /admin/files/{id}/subscriptions/new", a.requireAdmin(http.HandlerFunc(a.newFileAssociationPage)))
 	mux.Handle("POST /admin/files/{id}/subscriptions", a.requireAdmin(a.requireCSRF(http.HandlerFunc(a.createFileAssociation))))
@@ -293,6 +294,10 @@ func messageFromQuery(value string) string {
 		return "系统设置已保存"
 	case "file-replaced":
 		return "订阅文件已替换"
+	case "file-associations-replaced":
+		return "文件已替换，所有关联订阅已同步更新，更新后拉取次数从零开始统计"
+	case "file-unchanged":
+		return "上传文件与当前文件内容相同，关联订阅和拉取次数保持不变"
 	case "file-detached":
 		return "订阅文件已删除，订阅已自动停用；原始文件仍保留在文件管理中"
 	case "file-deleted":
